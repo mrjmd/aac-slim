@@ -14,6 +14,15 @@ interface EnvConfig {
   quo: {
     apiKey: string;
     webhookSecret: string;
+    phoneNumber: string; // Your Quo number for sending messages
+  };
+  // Google Ads
+  googleAds: {
+    webhookKey: string | null; // Optional until configured
+  };
+  // Notifications
+  notifications: {
+    alertPhoneNumber: string; // Phone to receive lead alerts
   };
   // Redis
   redis: {
@@ -46,6 +55,13 @@ export function getEnv(): EnvConfig {
     quo: {
       apiKey: requireEnv('QUO_API_KEY'),
       webhookSecret: requireEnv('QUO_WEBHOOK_SECRET'),
+      phoneNumber: requireEnv('QUO_PHONE_NUMBER'),
+    },
+    googleAds: {
+      webhookKey: process.env.GOOGLE_ADS_WEBHOOK_KEY || null,
+    },
+    notifications: {
+      alertPhoneNumber: requireEnv('ALERT_PHONE_NUMBER'),
     },
     redis: {
       url: requireEnv('UPSTASH_REDIS_REST_URL'),

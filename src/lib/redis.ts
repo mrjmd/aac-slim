@@ -49,7 +49,7 @@ const TTL = {
  * @returns true if this is a new event, false if already processed
  */
 export async function markEventProcessed(
-  source: 'pipedrive' | 'quo',
+  source: 'pipedrive' | 'quo' | 'google-ads',
   eventId: string
 ): Promise<boolean> {
   const redis = getRedis();
@@ -73,7 +73,7 @@ export async function markEventProcessed(
  * Check if event was already processed (without marking it)
  */
 export async function wasEventProcessed(
-  source: 'pipedrive' | 'quo',
+  source: 'pipedrive' | 'quo' | 'google-ads',
   eventId: string
 ): Promise<boolean> {
   const redis = getRedis();
@@ -139,7 +139,7 @@ export async function getPipedriveIdFromPhone(e164Phone: string): Promise<string
  * Clear a dedupe key (useful if we need to reprocess)
  */
 export async function clearDedupeKey(
-  source: 'pipedrive' | 'quo',
+  source: 'pipedrive' | 'quo' | 'google-ads',
   eventId: string
 ): Promise<void> {
   const redis = getRedis();

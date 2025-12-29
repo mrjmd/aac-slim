@@ -118,23 +118,45 @@ export async function getOrganization(id: number): Promise<PipedriveOrganization
 }
 
 /**
- * Create a new person (Unknown Lead)
- * @param name - Person name (e.g., "Unknown Lead +15551234567")
+ * Create a new person
+ * @param name - Person name
  * @param phone - E.164 formatted phone number
+ * @param options - Optional additional fields
  */
 export async function createPerson(
   name: string,
-  phone: string
+  phone: string,
+  options?: {
+    email?: string;
+    note?: string; // For lead source tracking
+  }
 ): Promise<PipedrivePerson> {
   log.info('Creating person', { name, phone });
 
+  const body: Record<string, unknown> = {
+    name,
+    phone: [{ value: phone, primary: true }],
+  };
+
+  if (options?.email) {
+    body.email = [{ value: options.email, primary: true }];
+  }
+
   const person = await pipedriveRequest<PipedrivePerson>('/persons', {
     method: 'POST',
-    body: JSON.stringify({
-      name,
-      phone: [{ value: phone, primary: true }],
-    }),
+    body: JSON.stringify(body),
   });
+
+  // Add note separately if provided (for lead source tracking)
+  if (options?.note) {
+    await pipedriveRequest('/notes', {
+      method: 'POST',
+      body: JSON.stringify({
+        content: options.note,
+        person_id: person.id,
+      }),
+    });
+  }
 
   log.info('Created person', { personId: person.id, name });
   return person;
@@ -195,6 +217,34 @@ export async function logActivity(
   });
 
   log.info('Logged activity', { activityId: activity.id, personId });
+  return activity;
+}
+
+/**
+ * Create a task (undone activity) for a person
+ * Used for things like "Call this lead back"
+ */
+export async function createTask(
+  personId: number,
+  subject: string,
+  note?: string
+): Promise<PipedriveActivity> {
+  log.info('Creating task', { personId, subject });
+
+  const activity = await pipedriveRequest<PipedriveActivity>('/activities', {
+    method: 'POST',
+    body: JSON.stringify({
+      type: 'task',
+      subject,
+      person_id: personId,
+      note,
+      done: false, // Task is not yet completed
+      due_date: new Date().toISOString().split('T')[0], // Due today
+      due_time: new Date().toTimeString().slice(0, 5), // Due now
+    }),
+  });
+
+  log.info('Created task', { activityId: activity.id, personId });
   return activity;
 }
 

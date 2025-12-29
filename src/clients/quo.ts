@@ -198,3 +198,29 @@ export function getFullName(contact: QuoContact): string {
 export function getPrimaryPhone(contact: QuoContact): string | null {
   return contact.defaultFields?.phoneNumbers?.[0]?.value || null;
 }
+
+/**
+ * Send an SMS message via Quo/OpenPhone
+ * @param from - Your Quo phone number (E.164 format)
+ * @param to - Recipient phone number (E.164 format)
+ * @param text - Message content
+ */
+export async function sendMessage(
+  from: string,
+  to: string,
+  text: string
+): Promise<{ id: string }> {
+  log.info('Sending SMS', { from, to, textLength: text.length });
+
+  const result = await quoRequest<{ data: { id: string } }>('/messages', {
+    method: 'POST',
+    body: JSON.stringify({
+      from,
+      to: [to],
+      content: text,
+    }),
+  });
+
+  log.info('Sent SMS', { messageId: result.data.id });
+  return result.data;
+}

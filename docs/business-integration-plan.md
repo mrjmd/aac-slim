@@ -1,7 +1,7 @@
 # Business Systems Integration Plan: The "Crawl, Walk, Run" Architecture
 
-**Version:** 1.4
-**Date:** December 19, 2025
+**Version:** 1.5
+**Date:** December 29, 2024
 **Status:** In Progress
 
 ---
@@ -37,6 +37,10 @@ graph TD
         ZI[ZoomInfo]
     end
 
+    subgraph "Lead Sources"
+        GAds[Google Ads Lead Forms]
+    end
+
     subgraph "The Money Engine"
         QB[QuickBooks Online]
     end
@@ -61,6 +65,10 @@ graph TD
     %% Flows
     User -->|Exports Lead| PD
     ZI -->|Exports Lead| PD
+
+    %% Google Ads
+    GAds -->|Webhook: Lead Form| MW_Sync
+    MW_Sync -->|Create Person| PD
 
     %% Quo Sync
     Quo -->|Webhook: Call/Text| MW_Sync
@@ -125,7 +133,95 @@ The system that ensures every conversation is logged and actionable.
 - **If Found:** Log Activity (Call/SMS) to that Person
 - **If Not Found:** Create "Unknown Lead" Person in Pipedrive immediately, then log Activity. (This triggers the Pipedrive->Quo sync in step 1, pushing the contact back to Quo)
 
-#### 1.2 The AI Listener (The "Smart Ingest")
+#### 1.2 Google Ads Lead Form Integration
+
+**Concept:** Automatically sync leads from Google Ads Lead Form Extensions directly into Pipedrive, eliminating manual CSV exports.
+
+**Current State:** Leads compile into a CSV that requires manual import.
+
+**Solution:** Google Ads supports native webhooks for Lead Form Extensions. When a user submits a lead form, Google POSTs the data directly to our middleware endpoint.
+
+**Trigger:** Google Ads Lead Form submission (webhook POST)
+
+**Webhook Payload Structure:**
+```json
+{
+  "lead_id": "TeSter-abc123-def456",
+  "user_column_data": [
+    { "column_id": "FULL_NAME", "string_value": "John Smith" },
+    { "column_id": "PHONE_NUMBER", "string_value": "+15551234567" },
+    { "column_id": "EMAIL", "string_value": "john@example.com" },
+    { "column_id": "CITY", "string_value": "Boston" }
+  ],
+  "form_id": 123456789,
+  "campaign_id": 987654321,
+  "google_key": "your-configured-secret-key",
+  "is_test": false,
+  "gcl_id": "click-tracking-id",
+  "lead_submit_time": "2024-12-29T14:30:00Z"
+}
+```
+
+**Logic:**
+1. Receive POST at `/api/webhooks/google-ads`
+2. Verify `google_key` matches our configured secret
+3. Use `lead_id` for deduplication (Google doesn't guarantee exactly-once delivery)
+4. Extract fields from `user_column_data` array
+5. Search Pipedrive by phone number (already E.164 formatted)
+6. **If Found:** Update existing person with any new data (don't overwrite real name with less accurate data)
+7. **If Not Found:** Create new Pipedrive Person with:
+   - Name from `FULL_NAME`
+   - Phone from `PHONE_NUMBER`
+   - Email from `EMAIL`
+   - Lead Source = "Google Ads"
+   - Campaign ID stored in custom field or note for attribution
+8. **Notify:** Send immediate alerts (see Notification section below)
+
+**Notification (Immediate Lead Alerts):**
+
+When a new Google Ads lead is created or matched:
+
+1. **SMS Alert via Quo:**
+   - Send to: `ALERT_PHONE_NUMBER` (configured in env)
+   - Message format:
+     ```
+     🔥 New Google Ads Lead
+     {Name}
+     {Phone}
+     Campaign: {campaign_id}
+     ```
+   - Enables immediate callback (hot leads convert better)
+
+2. **Pipedrive Activity:**
+   - Type: Task
+   - Subject: "🔥 Google Ads Lead - Call {Name}"
+   - Due: Immediate
+   - Assigned to: Person owner
+   - Note: Includes lead source, campaign ID, submission time
+   - Ensures lead is tracked and doesn't fall through cracks
+
+**Attribution Tracking:**
+- Store `campaign_id` and `gcl_id` on the Pipedrive Person
+- Enables ROI analysis: "Which Google Ads campaigns generate closed deals?"
+
+**Setup Steps (Google Ads UI):**
+1. Edit Lead Form Asset
+2. Expand "Export leads from Google Ads"
+3. Expand "Other data integration options"
+4. Under "Webhook integration": Add middleware URL + secret key
+5. Click "Send test data" to verify
+
+**Endpoint:** `POST /api/webhooks/google-ads`
+
+**Response Codes:**
+- `200`: Lead processed successfully
+- `401`: Invalid `google_key`
+- `200` with `status: duplicate`: Already processed this `lead_id`
+
+> [!NOTE]
+> **Phone Format Bonus:** Google Ads sends phone numbers in E.164 format (e.g., `+15551234567`), matching our existing normalization standard. No conversion needed.
+
+#### 1.3 The AI Listener (The "Smart Ingest")
 
 **Concept:** AI parses unstructured text/audio to structured data, removing the need for manual Quo contact creation.
 
@@ -142,7 +238,7 @@ The system that ensures every conversation is logged and actionable.
 - If high confidence (>90%) & Contact is "Unknown": Update the Pipedrive Contact Name/Address automatically
 - If intent = "Booking": Create a "Task" in Pipedrive for the Salesperson: "Booking Request Detected"
 
-#### 1.3 The Campaign Manager (Cold Texting)
+#### 1.4 The Campaign Manager (Cold Texting)
 
 **Concept:** A "Thin UI" (React/Next.js) to upload lists and schedule blasts.
 
@@ -276,8 +372,9 @@ The system to batch-generate branded assets.
 
 ### Phase 1: The "Crawl" (Core Connectivity)
 
-- [ ] Server Setup: Deploy Node.js middleware (Vercel/AWS)
-- [ ] Sync v1: Build Pipedrive <-> Quo 2-way sync (Contact Name & Phone only)
+- [x] Server Setup: Deploy Node.js middleware on Vercel
+- [x] Module 1.1: Pipedrive <-> Quo bidirectional sync (Name, Phone, Company, Job Title)
+- [ ] Module 1.2: Google Ads Lead Form -> Pipedrive integration
 - [ ] Financial v1: Build Pipedrive -> QuickBooks Contact creation
 - [x] Compliance: Register for A2P 10DLC (Completed)
 

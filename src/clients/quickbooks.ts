@@ -36,9 +36,33 @@ export interface QBCustomer {
 interface QBResponse<T> {
   QueryResponse?: {
     Customer?: T[];
+    Invoice?: T[];
     maxResults?: number;
   };
   Customer?: T;
+  Invoice?: T;
+}
+
+// QuickBooks Invoice entity
+export interface QBInvoice {
+  Id: string;
+  DocNumber?: string; // Invoice number
+  TxnDate?: string; // Transaction date (YYYY-MM-DD)
+  DueDate?: string;
+  TotalAmt: number;
+  Balance: number; // 0 = fully paid
+  CustomerRef: {
+    value: string; // Customer ID
+    name?: string;
+  };
+  LinkedTxn?: Array<{
+    TxnId: string;
+    TxnType: string; // "Payment" for payments
+  }>;
+  MetaData?: {
+    CreateTime: string;
+    LastUpdatedTime: string;
+  };
 }
 
 /**
@@ -320,5 +344,53 @@ export async function isQuickBooksConnected(): Promise<boolean> {
     return true;
   } catch {
     return false;
+  }
+}
+
+// ============================================
+// INVOICE FUNCTIONS (for Attribution Engine)
+// ============================================
+
+/**
+ * Get paid invoices within a date range
+ * Paid invoices have Balance = 0
+ */
+export async function getPaidInvoices(
+  startDate: string, // YYYY-MM-DD
+  endDate: string    // YYYY-MM-DD
+): Promise<QBInvoice[]> {
+  try {
+    // Query for invoices with Balance = 0 (fully paid) within date range
+    // TxnDate is the invoice date, but we want to filter by when it was paid
+    // We'll use MetaData.LastUpdatedTime as a proxy (paid invoices get updated when paid)
+    const query = `SELECT * FROM Invoice WHERE Balance = '0' AND TxnDate >= '${startDate}' AND TxnDate <= '${endDate}' ORDERBY TxnDate DESC MAXRESULTS 1000`;
+
+    log.info('Fetching paid invoices', { startDate, endDate });
+
+    const result = await qbRequest<QBResponse<QBInvoice>>(
+      `/query?query=${encodeURIComponent(query)}`
+    );
+
+    const invoices = result.QueryResponse?.Invoice || [];
+
+    log.info('Found paid invoices', { count: invoices.length, startDate, endDate });
+
+    return invoices;
+  } catch (error) {
+    log.error('Get paid invoices failed', error as Error, { startDate, endDate });
+    throw error;
+  }
+}
+
+/**
+ * Get a single invoice by ID
+ */
+export async function getInvoice(invoiceId: string): Promise<QBInvoice | null> {
+  try {
+    const result = await qbRequest<{ Invoice: QBInvoice }>(`/invoice/${invoiceId}`);
+    return result.Invoice || null;
+  } catch (error) {
+    log.error('Get invoice failed', error as Error, { invoiceId });
+    return null;
   }
 }

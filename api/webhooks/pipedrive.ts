@@ -10,7 +10,7 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { logger } from '../../src/lib/logger.js';
 import { normalizePhone } from '../../src/lib/phone.js';
-import { markEventProcessed, storeIdMapping, getQuoIdFromPipedrive, storePhoneMapping, getQbCustomerIdFromPipedrive, storePipedriveToQbMapping } from '../../src/lib/redis.js';
+import { markEventProcessed, storeIdMapping, getQuoIdFromPipedrive, storePhoneMapping, getQbCustomerIdFromPipedrive, storePipedriveToQbMapping, storeQbToPipedriveMapping } from '../../src/lib/redis.js';
 import { searchContactByPhone, createContact, updateContact, parseFullName } from '../../src/clients/quo.js';
 import { getOrganization, getPerson } from '../../src/clients/pipedrive.js';
 import { isQuickBooksConnected, searchCustomerByEmail, searchCustomerByName, createCustomer } from '../../src/clients/quickbooks.js';
@@ -241,6 +241,7 @@ export default async function handler(
             // Link existing customer
             qbCustomerId = existingCustomer.Id;
             await storePipedriveToQbMapping(String(data.id), qbCustomerId);
+            await storeQbToPipedriveMapping(qbCustomerId, String(data.id));
             log.info('Linked existing QuickBooks customer', {
               pipedriveId: data.id,
               qbCustomerId,
@@ -259,6 +260,7 @@ export default async function handler(
             qbCustomerId = newCustomer.Id || null;
             if (qbCustomerId) {
               await storePipedriveToQbMapping(String(data.id), qbCustomerId);
+              await storeQbToPipedriveMapping(qbCustomerId, String(data.id));
             }
             log.info('Created new QuickBooks customer', {
               pipedriveId: data.id,

@@ -37,8 +37,14 @@ const KEYS = {
   middlewareCreated: (pipedriveId: string) => `created-by-us:pd:${pipedriveId}`,
   /** Pipedrive ID -> QuickBooks Customer ID mapping */
   mapPipedriveToQb: (pipedriveId: string) => `map:pd-to-qb:${pipedriveId}`,
+  /** QuickBooks Customer ID -> Pipedrive ID reverse mapping */
+  mapQbToPipedrive: (qbCustomerId: string) => `map:qb-to-pd:${qbCustomerId}`,
   /** QuickBooks OAuth tokens */
   qbOAuthTokens: () => 'oauth:quickbooks:tokens',
+  /** Attribution result for a specific invoice */
+  attribution: (invoiceId: string) => `attribution:${invoiceId}`,
+  /** Track which invoices have been processed */
+  attributionProcessed: (invoiceId: string) => `attribution:processed:${invoiceId}`,
 } as const;
 
 // TTLs in seconds
@@ -46,6 +52,7 @@ const TTL = {
   dedupe: 86400, // 24 hours
   mapping: 604800, // 7 days
   loopPrevention: 60, // 1 minute - just long enough to catch the webhook
+  attribution: 31536000, // 1 year - keep attribution records long-term
 } as const;
 
 /**
@@ -219,4 +226,105 @@ export async function storePipedriveToQbMapping(
 export async function getQbCustomerIdFromPipedrive(pipedriveId: string): Promise<string | null> {
   const redis = getRedis();
   return redis.get(KEYS.mapPipedriveToQb(pipedriveId));
+}
+
+/**
+ * Store QuickBooks Customer ID -> Pipedrive Person ID mapping (reverse)
+ */
+export async function storeQbToPipedriveMapping(
+  qbCustomerId: string,
+  pipedriveId: string
+): Promise<void> {
+  const redis = getRedis();
+  await redis.set(KEYS.mapQbToPipedrive(qbCustomerId), pipedriveId, { ex: TTL.mapping });
+  logger.debug('Stored QB->Pipedrive mapping', { qbCustomerId, pipedriveId });
+}
+
+/**
+ * Get Pipedrive Person ID from QuickBooks Customer ID
+ */
+export async function getPipedriveIdFromQb(qbCustomerId: string): Promise<string | null> {
+  const redis = getRedis();
+  return redis.get(KEYS.mapQbToPipedrive(qbCustomerId));
+}
+
+// ============================================
+// ATTRIBUTION ENGINE
+// ============================================
+
+export interface AttributionResult {
+  invoiceId: string;
+  invoiceNumber: string;
+  customerId: string;
+  customerName: string;
+  invoiceAmount: number;
+  invoiceDate: string; // YYYY-MM-DD
+  salesRepId: number;
+  salesRepName: string;
+  commissionRate: number;
+  commissionAmount: number;
+  attributedAt: string; // ISO timestamp
+  referralChain: number[]; // Person IDs in chain (for debugging)
+}
+
+/**
+ * Store attribution result for an invoice
+ */
+export async function storeAttribution(result: AttributionResult): Promise<void> {
+  const redis = getRedis();
+  await redis.set(KEYS.attribution(result.invoiceId), result, { ex: TTL.attribution });
+  await redis.set(KEYS.attributionProcessed(result.invoiceId), Date.now(), { ex: TTL.attribution });
+  logger.debug('Stored attribution', { invoiceId: result.invoiceId, salesRep: result.salesRepName });
+}
+
+/**
+ * Get attribution result for a specific invoice
+ */
+export async function getAttribution(invoiceId: string): Promise<AttributionResult | null> {
+  const redis = getRedis();
+  return redis.get<AttributionResult>(KEYS.attribution(invoiceId));
+}
+
+/**
+ * Check if an invoice has already been processed
+ */
+export async function wasInvoiceAttributed(invoiceId: string): Promise<boolean> {
+  const redis = getRedis();
+  const exists = await redis.exists(KEYS.attributionProcessed(invoiceId));
+  return exists === 1;
+}
+
+/**
+ * Get all attribution results for a date range
+ * Note: This scans keys - for production scale, consider using a sorted set index
+ */
+export async function getAttributionsByDateRange(
+  startDate: string,
+  endDate: string
+): Promise<AttributionResult[]> {
+  const redis = getRedis();
+
+  // Get all attribution keys
+  const keys = await redis.keys('attribution:*');
+
+  // Filter out the "processed" keys
+  const attributionKeys = keys.filter(k => !k.includes(':processed:'));
+
+  if (attributionKeys.length === 0) {
+    return [];
+  }
+
+  // Fetch all attribution records
+  const results: AttributionResult[] = [];
+  for (const key of attributionKeys) {
+    const data = await redis.get<AttributionResult>(key);
+    if (data && data.invoiceDate >= startDate && data.invoiceDate <= endDate) {
+      results.push(data);
+    }
+  }
+
+  // Sort by invoice date
+  results.sort((a, b) => a.invoiceDate.localeCompare(b.invoiceDate));
+
+  return results;
 }

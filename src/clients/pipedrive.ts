@@ -14,7 +14,11 @@ interface PipedrivePerson {
   phone: Array<{ value: string; primary: boolean }>;
   email: Array<{ value: string; primary: boolean }>;
   org_id?: number;
-  owner_id?: number;
+  owner_id?: {
+    id: number;
+    name: string;
+    email: string;
+  };
 }
 
 interface PipedriveOrganization {
@@ -359,4 +363,83 @@ export async function updatePersonIncremental(
 export function getPrimaryEmail(person: PipedrivePerson): string | null {
   const primary = person.email?.find((e) => e.primary);
   return primary?.value || person.email?.[0]?.value || null;
+}
+
+// ============================================
+// ATTRIBUTION ENGINE FUNCTIONS
+// ============================================
+
+// Custom field key for "Referred by" (links to another Person)
+const REFERRED_BY_FIELD_KEY = '34e9bd78a631d8950b507a722c4e245a9ef9de11';
+
+interface PipedriveUser {
+  id: number;
+  name: string;
+  email: string;
+  active_flag: boolean;
+}
+
+/**
+ * Get the "Referred by" person ID from a person record
+ * Used for chain traversal in attribution
+ * @returns The Pipedrive Person ID that referred this person, or null
+ */
+export async function getPersonReferredBy(personId: number): Promise<number | null> {
+  try {
+    // Get full person details including custom fields
+    const env = getEnv();
+    const baseUrl = `https://api.pipedrive.com/v1`;
+    const url = new URL(`${baseUrl}/persons/${personId}`);
+    url.searchParams.set('api_token', env.pipedrive.apiKey);
+
+    const response = await fetch(url.toString());
+    if (!response.ok) {
+      log.error('Failed to get person for referred by', new Error(`Status ${response.status}`), { personId });
+      return null;
+    }
+
+    const data = await response.json();
+    const person = data.data;
+
+    if (!person) {
+      return null;
+    }
+
+    // The "Referred by" field is a people type field - value is the person ID
+    const referredById = person[REFERRED_BY_FIELD_KEY];
+
+    if (referredById) {
+      log.debug('Found referred by', { personId, referredById });
+      return typeof referredById === 'number' ? referredById : parseInt(referredById, 10);
+    }
+
+    return null;
+  } catch (error) {
+    log.error('Get referred by failed', error as Error, { personId });
+    return null;
+  }
+}
+
+/**
+ * Get a Pipedrive user (salesperson) by ID
+ */
+export async function getPipedriveUser(userId: number): Promise<PipedriveUser | null> {
+  try {
+    return await pipedriveRequest<PipedriveUser>(`/users/${userId}`);
+  } catch (error) {
+    log.error('Get Pipedrive user failed', error as Error, { userId });
+    return null;
+  }
+}
+
+/**
+ * Get the owner (salesperson) of a person
+ * @returns The owner's user ID, or null
+ */
+export async function getPersonOwnerId(personId: number): Promise<number | null> {
+  const person = await getPerson(personId);
+  if (!person) {
+    return null;
+  }
+  return person.owner_id?.id || null;
 }

@@ -133,46 +133,78 @@ Commission = Invoice Total × Salesperson Commission Rate
 }
 ```
 
-### 3.4 Output Format: QuickBooks Native
+### 3.4 Output Format: Middleware-Based Reporting
 
-**Design Decision:** Store all commission data directly in QuickBooks rather than external systems (Google Sheets). This keeps financial data in the financial system and enables native QB reporting for payroll.
+**Design Decision:** Store attribution data in Redis and generate reports via middleware. QuickBooks tier limitations (custom field limits, tag restrictions) make QB-native storage impractical. This approach gives us full control and scales better.
 
-**Hybrid Approach: Sales Rep + Custom Field**
-
-| Field | Type | Purpose |
-|-------|------|---------|
-| **Sales Rep** | Built-in QB field | Identifies which salesperson gets credit |
-| **Commission Amount** | Custom field on Invoice | Stores calculated commission ($) |
-
-**How It Works:**
-
-1. Enable Sales Rep tracking in QB (Settings → Sales → Sales form content)
-2. Create a Sales Rep entry for each salesperson
-3. Add custom field "Commission Amount" to Invoice form
-4. When attribution runs:
-   - Update each paid Invoice with the Sales Rep
-   - Calculate and store Commission Amount in custom field
-5. Run native QB reports: Filter by Sales Rep, date range → see commissions
+**Data Storage:**
+| Data | Location | Key Pattern |
+|------|----------|-------------|
+| Attribution results | Redis | `attribution:{invoiceId}` → `{salesRep, commission, date, ...}` |
+| Salesperson config | Redis/Env | `config:salespeople` → `{id, name, rate}` |
+| Processed invoices | Redis | `attribution:processed:{invoiceId}` → timestamp |
 
 **Benefits:**
-- No new API integration (already have QB OAuth)
-- All data stays in QuickBooks (single source of truth for financials)
-- Native QB reporting for payroll
-- No Google Sheets service account setup
+- No QuickBooks plan upgrade needed
+- Unlimited salespeople with individual commission rates
+- Full control over report format
+- Can automate email delivery in future
 
 ### 3.5 Reporting
 
-**In QuickBooks:**
-- Sales by Customer Summary → Filter by Sales Rep
-- Custom Reports → Include Commission Amount field
-- Export to Excel if needed for further analysis
+**Report Triggers:**
 
-**Report Periods:**
-| Report Type | Description |
-|-------------|-------------|
-| Monthly | Filter invoices paid in a calendar month |
-| Custom Range | User-specified start/end dates |
-| By Sales Rep | All commissions for a specific salesperson |
+| Trigger | Description | Use Case |
+|---------|-------------|----------|
+| **On-demand** | Manual API call with date range | "How much did Ed earn this quarter?" |
+| **Scheduled** | Monthly on 1st (previous month) | Automated payroll reports |
+
+**On-Demand Endpoint:**
+```
+GET /api/reports/commissions?startDate=2025-12-01&endDate=2025-12-31
+GET /api/reports/commissions?salesRep=ed&startDate=2025-10-01&endDate=2025-12-31
+```
+
+**Output Formats:**
+
+1. **JSON Response** (for API/programmatic use)
+2. **HTML Table** (copy-paste into email)
+3. **SMS Summary** (via Quo to owner)
+
+**Report Example:**
+```
+AAC Commission Report
+Period: Dec 1 - Dec 31, 2025
+
+Sales Rep: Ed Smith
+Commission Rate: 20%
+
+Invoice #  | Customer      | Paid Date  | Amount    | Commission
+-----------|---------------|------------|-----------|------------
+1234       | John Doe      | 12/05/25   | $5,000    | $1,000
+1235       | Jane Smith    | 12/12/25   | $3,500    | $700
+1241       | Mike Johnson  | 12/28/25   | $8,000    | $1,600
+-----------|---------------|------------|-----------|------------
+TOTAL                                    $16,500    | $3,300
+```
+
+### 3.6 Delivery Phases
+
+**Phase 1 (MVP):**
+- On-demand endpoint with date range parameters
+- Returns HTML table (copy-paste ready)
+- SMS summary sent via Quo: "Dec commissions: Ed $3,300 (3 jobs)"
+
+**Phase 2 (Automation):**
+- Scheduled monthly job (Vercel Cron)
+- Runs on 1st of month for previous month
+- Sends SMS summary automatically
+
+**Phase 3 (Full Automation - Future):**
+- Gmail API integration
+- Send formatted report from your email address
+- Direct to payroll company
+- No manual steps required
 
 ---
 
@@ -193,51 +225,39 @@ Commission = Invoice Total × Salesperson Commission Rate
 └────────┬────────┘
          │ For each invoice:
          │ 1. Get QB Customer
-         │ 2. Look up Pipedrive Person (Redis)
-         │ 3. Traverse referral chain
-         │ 4. Find salesperson owner
-         │ 5. Calculate commission
-         │ 6. Update Invoice with Sales Rep + Commission
+         │ 2. Look up Pipedrive Person (Redis mapping)
+         │ 3. Traverse referral chain in Pipedrive
+         │ 4. Find salesperson (owner at top of chain)
+         │ 5. Calculate commission (amount × rate)
+         │ 6. Store result in Redis
          ▼
 ┌─────────────────┐
-│   QuickBooks    │
-│ (Updated Invoice│
-│  with Sales Rep │
-│  + Commission)  │
-└─────────────────┘
+│      Redis      │
+│  (Attribution   │
+│    Results)     │
+└────────┬────────┘
          │
          ▼
-    Native QB Reports
-    for Payroll
+┌─────────────────────────────────────────┐
+│            Report Generation            │
+├─────────────────┬───────────────────────┤
+│   HTML Table    │    SMS Summary        │
+│ (copy-paste)    │   (via Quo)           │
+└─────────────────┴───────────────────────┘
 ```
 
 ### 4.2 New Components Needed
 
 | Component | Purpose |
 |-----------|---------|
-| `src/clients/quickbooks.ts` | Add: `getPaidInvoices()`, `updateInvoice()`, `getSalesReps()` |
-| `src/clients/pipedrive.ts` | Add: `getPersonReferredBy()` (custom field lookup) |
-| `src/lib/attribution.ts` | New: Chain traversal + commission calculation logic |
-| `api/jobs/attribution.ts` | New: Endpoint to trigger attribution job |
+| `src/clients/quickbooks.ts` | Add: `getPaidInvoices()` |
+| `src/clients/pipedrive.ts` | Add: `getPersonReferredBy()`, `getPipedriveUser()` |
+| `src/lib/attribution.ts` | New: Chain traversal + commission calculation |
+| `src/lib/report-generator.ts` | New: Format results as HTML table, SMS summary |
+| `api/jobs/attribution.ts` | New: Endpoint to run attribution |
+| `api/reports/commissions.ts` | New: On-demand report endpoint |
 
-### 4.3 QuickBooks Setup (One-Time)
-
-**Step 1: Enable Sales Rep**
-1. Go to Settings (gear icon) → Account and Settings
-2. Sales → Sales form content
-3. Enable "Custom transaction numbers" if not already
-4. The Sales Rep field should be available on invoices
-
-**Step 2: Create Sales Rep Entries**
-1. For each salesperson, create a Sales Rep in QB
-2. Note the Sales Rep ID (we'll need this for API calls)
-
-**Step 3: Add Commission Amount Custom Field**
-1. Go to Settings → Custom fields
-2. Add new field on Invoice: "Commission Amount" (Number/Currency type)
-3. Note the custom field ID
-
-### 4.4 Pipedrive Custom Field
+### 4.3 Pipedrive Custom Field
 
 **"Referred by" Field:**
 - Field type: Person (link to another Person)
@@ -277,69 +297,70 @@ COMMISSION_RATES={"default": 0.20}
 
 ### Phase 2.1: Core Attribution (MVP)
 
-1. **QuickBooks Setup**
-   - Enable Sales Rep field
-   - Create Sales Rep entry for current salesperson
-   - Add "Commission Amount" custom field to Invoice
-
-2. **Find Pipedrive "Referred by" Field Key**
+1. **Find Pipedrive "Referred by" Field Key**
    - Query `GET /personFields`
    - Store the hash key for use in lookups
 
-3. **QuickBooks Invoice Fetching**
+2. **QuickBooks Invoice Fetching**
    - Add `getPaidInvoices(startDate, endDate)` to QB client
    - Returns invoices with Balance = 0 (fully paid)
 
-4. **Pipedrive Chain Traversal**
+3. **Pipedrive Chain Traversal**
    - Implement `getPersonReferredBy(personId)`
    - Implement recursive chain traversal
+   - Get salesperson name from `owner_id` → Pipedrive User
    - Handle edge cases (no referral, circular, missing)
 
-5. **Commission Calculation**
+4. **Commission Calculation**
    - Single hardcoded rate (20%) initially
    - Calculate: Invoice Total × 0.20
 
-6. **Update Invoice in QuickBooks**
-   - Set Sales Rep field
-   - Set Commission Amount custom field
-   - Handle sparse update (don't overwrite other fields)
+5. **Store Results in Redis**
+   - Key: `attribution:{invoiceId}`
+   - Value: `{invoiceNum, customer, amount, salesRep, commission, paidDate}`
 
-7. **Manual Trigger Endpoint**
-   - `POST /api/jobs/attribution`
-   - Query params: `startDate`, `endDate` (default: last 2 weeks)
-   - Returns: count of invoices processed, any errors
+6. **Report Generation**
+   - HTML table format (copy-paste ready)
+   - SMS summary via Quo
+
+7. **On-Demand Endpoint**
+   - `GET /api/reports/commissions?startDate=X&endDate=Y`
+   - Optional: `&salesRep=name` filter
+   - Returns HTML table + sends SMS summary
 
 ### Phase 2.2: Automation & Polish
 
 1. **Scheduled Execution**
    - Vercel Cron job
    - Run monthly (1st of month, process previous month)
+   - Auto-send SMS summary
 
 2. **Deduplication**
    - Track processed invoices in Redis
-   - Skip already-attributed invoices
+   - Option to re-run and update existing records
 
 3. **Configurable Commission Rates**
    - Move rates to Redis/config
    - Support multiple salespeople with different rates
 
-4. **Error Handling & Logging**
+4. **Error Handling & Reporting**
    - Log invoices that couldn't be attributed
-   - Surface errors for investigation
+   - Include "unattributed" section in report
 
-### Phase 2.3: Enhanced Features (Future)
+### Phase 2.3: Full Automation (Future)
 
-1. **Pipedrive Activity Logging** (Optional)
-   - Log commission activity on salesperson record in Pipedrive
+1. **Gmail API Integration**
+   - Connect Gmail via OAuth
+   - Send formatted report from your email address
+   - Direct to payroll company automatically
+
+2. **Pipedrive Activity Logging** (Optional)
+   - Log commission activity on salesperson record
    - Provides visibility without leaving CRM
 
-2. **Estimate → Deal Sync** (If Needed)
+3. **Estimate → Deal Sync** (If Needed)
    - QB Estimate created → Pipedrive Deal created
    - Provides sales pipeline visibility
-
-3. **Attribution Dashboard** (If Needed)
-   - Simple web UI to view commission summaries
-   - Only if QB reporting proves insufficient
 
 ---
 
@@ -349,18 +370,18 @@ COMMISSION_RATES={"default": 0.20}
 
 - [x] QuickBooks OAuth working (Module 1.4)
 - [x] Pipedrive ↔ QB customer mapping in Redis
+- [x] Quo SMS sending working (for report summaries)
 - [ ] "Referred by" custom field key from Pipedrive
-- [ ] Sales Rep enabled and created in QuickBooks
-- [ ] "Commission Amount" custom field added in QuickBooks
 
 ### API Permissions Needed
 
 | API | Scope/Permission | Status |
 |-----|------------------|--------|
 | QuickBooks | `com.intuit.quickbooks.accounting` | Already have |
-| Pipedrive | Read persons, read custom fields | Already have |
+| Pipedrive | Read persons, read users, read custom fields | Already have |
+| Quo | Send SMS | Already have |
 
-**No new APIs required!** This is a key simplification from the original Google Sheets approach.
+**No new APIs required!** Everything uses existing integrations.
 
 ---
 
@@ -369,24 +390,26 @@ COMMISSION_RATES={"default": 0.20}
 | Question | Answer |
 |----------|--------|
 | "Referred by" field name | "Referred by" (need to get field key hash) |
-| Output format | QuickBooks native (Sales Rep + Custom Field) |
+| Output format | Middleware-based (Redis storage + HTML/SMS reports) |
 | Initial run scope | Last 2 weeks |
 | Going forward | On-demand initially, then monthly scheduled job |
+| QuickBooks storage | Not using - QB tier limitations make it impractical |
 
 ---
 
 ## 8. Remaining Questions
 
-1. **What is the Sales Rep name for the current salesperson?**
-   - Need to create this in QB
+1. **Should we log invoices that couldn't be attributed?**
+   - Include in report as "Unattributed" section?
+   - Or skip silently?
 
-2. **Should we log invoices that couldn't be attributed?**
-   - Separate log/report for review?
-   - Or just skip silently?
+2. **What happens if we re-run for same date range?**
+   - Overwrite existing attribution?
+   - Skip already-processed invoices?
+   - Probably: Allow re-run, update existing records
 
-3. **What happens if an invoice is already attributed?**
-   - Skip and don't update?
-   - Or allow re-running to fix errors?
+3. **What's the salesperson's name for the initial setup?**
+   - Need this for commission config
 
 ---
 
@@ -396,9 +419,9 @@ Attribution Engine is "done" when:
 
 - [ ] Given any paid QB invoice, system can identify the salesperson
 - [ ] Commission is calculated correctly (20% of gross)
-- [ ] Invoice is updated in QB with Sales Rep and Commission Amount
-- [ ] Job can be triggered manually via API endpoint
-- [ ] Native QB reports show commissions by Sales Rep
+- [ ] Results stored in Redis for reporting
+- [ ] On-demand endpoint returns HTML table for any date range
+- [ ] SMS summary sent via Quo
 - [ ] Edge cases are handled gracefully (logged, not crashed)
 
 ---
@@ -408,16 +431,17 @@ Attribution Engine is "done" when:
 | Component | Effort | Notes |
 |-----------|--------|-------|
 | QB Invoice fetching | Low | Straightforward API call |
-| QB Invoice updating | Low | Sparse update with Sales Rep + custom field |
 | "Referred by" field lookup | Low | One-time API query |
 | Chain traversal | Medium | Recursive logic, edge cases |
 | Commission calculation | Low | Simple math |
-| Deduplication | Low | Redis set/check |
-| Error handling | Medium | Various failure modes |
-| **Total** | **Medium** | Simpler than Google Sheets approach |
+| Redis storage | Low | Simple key-value |
+| Report generation | Low | String formatting |
+| SMS summary | Low | Already have Quo client |
+| On-demand endpoint | Low | Query Redis, format output |
+| **Total** | **Medium** | Simpler than original QB approach |
 
-**Key Simplification:** By storing data in QuickBooks instead of Google Sheets, we eliminated:
-- Google Cloud service account setup
-- Google Sheets API integration
-- New npm package dependencies
-- A separate data store to maintain
+**Key Simplification:** By storing data in Redis instead of QuickBooks:
+- No QB plan upgrade needed
+- No custom field limitations
+- Full control over report format
+- Can scale to any number of salespeople

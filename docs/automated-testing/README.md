@@ -25,12 +25,14 @@ tests/
 ├── integration/             # Tests with mocked external APIs
 │   ├── quo-webhook.test.ts  # Quo webhook handler logic
 │   ├── pipedrive-webhook.test.ts
-│   └── google-ads-webhook.test.ts
+│   ├── google-ads-webhook.test.ts
+│   └── quickbooks.test.ts   # QuickBooks OAuth & customer sync
 │
 └── mocks/                   # Shared mock implementations
     ├── pipedrive.ts
     ├── quo.ts
     ├── gemini.ts
+    ├── quickbooks.ts
     └── redis.ts
 ```
 
@@ -279,6 +281,145 @@ describe('Google Ads Webhook Handler', () => {
 
     expect(response.body.status).toBe('skipped');
     expect(response.body.reason).toBe('no_phone');
+  });
+});
+```
+
+### 2.5 QuickBooks Integration Tests
+
+```typescript
+// tests/integration/quickbooks.test.ts
+describe('QuickBooks Integration', () => {
+  beforeEach(() => {
+    mockQuickBooks.reset();
+    mockRedis.reset();
+  });
+
+  describe('OAuth Token Management', () => {
+    it('stores tokens correctly via storeQBTokens', async () => {
+      const tokens = {
+        accessToken: 'access123',
+        refreshToken: 'refresh456',
+        expiresAt: Date.now() + 3600000,
+        refreshTokenExpiresAt: Date.now() + 8726400000,
+      };
+
+      await storeQBTokens(tokens);
+
+      expect(mockRedis.set).toHaveBeenCalledWith(
+        'oauth:quickbooks:tokens',
+        tokens
+      );
+    });
+
+    it('retrieves tokens correctly via getQBTokens', async () => {
+      const storedTokens = {
+        accessToken: 'access123',
+        refreshToken: 'refresh456',
+        expiresAt: Date.now() + 3600000,
+        refreshTokenExpiresAt: Date.now() + 8726400000,
+      };
+      mockRedis.get.mockResolvedValue(storedTokens);
+
+      const tokens = await getQBTokens();
+
+      expect(tokens).toEqual(storedTokens);
+    });
+
+    it('returns null when no tokens stored', async () => {
+      mockRedis.get.mockResolvedValue(null);
+
+      const tokens = await getQBTokens();
+
+      expect(tokens).toBeNull();
+    });
+  });
+
+  describe('isQuickBooksConnected', () => {
+    it('returns true when valid tokens exist', async () => {
+      mockRedis.get.mockResolvedValue({
+        accessToken: 'valid',
+        expiresAt: Date.now() + 3600000,
+        refreshTokenExpiresAt: Date.now() + 8726400000,
+      });
+
+      const connected = await isQuickBooksConnected();
+
+      expect(connected).toBe(true);
+    });
+
+    it('returns false when no tokens', async () => {
+      mockRedis.get.mockResolvedValue(null);
+
+      const connected = await isQuickBooksConnected();
+
+      expect(connected).toBe(false);
+    });
+  });
+
+  describe('Customer Creation', () => {
+    it('creates customer with all fields', async () => {
+      mockQuickBooks.createCustomer.mockResolvedValue({ Id: '123' });
+
+      const customer = await createCustomer({
+        displayName: 'John Doe',
+        firstName: 'John',
+        lastName: 'Doe',
+        email: 'john@example.com',
+        phone: '+16175551234',
+      });
+
+      expect(customer.Id).toBe('123');
+      expect(mockQuickBooks.createCustomer).toHaveBeenCalledWith(
+        expect.objectContaining({
+          DisplayName: 'John Doe',
+          GivenName: 'John',
+          FamilyName: 'Doe',
+        })
+      );
+    });
+  });
+
+  describe('Pipedrive Webhook → QuickBooks', () => {
+    it('creates QB customer when contact added to Pipedrive', async () => {
+      mockRedis.get.mockImplementation((key) => {
+        if (key === 'oauth:quickbooks:tokens') {
+          return { accessToken: 'valid', expiresAt: Date.now() + 3600000 };
+        }
+        return null; // No existing mapping
+      });
+      mockQuickBooks.searchCustomerByEmail.mockResolvedValue(null);
+      mockQuickBooks.createCustomer.mockResolvedValue({ Id: '456' });
+
+      const response = await handlePipedriveWebhook(validPersonPayload);
+
+      expect(mockQuickBooks.createCustomer).toHaveBeenCalled();
+      expect(response.body.qbCustomerId).toBe('456');
+    });
+
+    it('skips QB sync when not connected', async () => {
+      mockRedis.get.mockResolvedValue(null); // No tokens
+
+      const response = await handlePipedriveWebhook(validPersonPayload);
+
+      expect(mockQuickBooks.createCustomer).not.toHaveBeenCalled();
+      expect(response.body.qbCustomerId).toBeNull();
+    });
+
+    it('links existing QB customer by email', async () => {
+      mockRedis.get.mockImplementation((key) => {
+        if (key === 'oauth:quickbooks:tokens') {
+          return { accessToken: 'valid', expiresAt: Date.now() + 3600000 };
+        }
+        return null;
+      });
+      mockQuickBooks.searchCustomerByEmail.mockResolvedValue({ Id: '789' });
+
+      const response = await handlePipedriveWebhook(validPersonPayload);
+
+      expect(mockQuickBooks.createCustomer).not.toHaveBeenCalled();
+      expect(response.body.qbCustomerId).toBe('789');
+    });
   });
 });
 ```

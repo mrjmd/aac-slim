@@ -35,6 +35,10 @@ const KEYS = {
   phoneToPipedrive: (e164Phone: string) => `phone:pd:${e164Phone}`,
   /** Track Pipedrive contacts we created (for loop prevention) */
   middlewareCreated: (pipedriveId: string) => `created-by-us:pd:${pipedriveId}`,
+  /** Pipedrive ID -> QuickBooks Customer ID mapping */
+  mapPipedriveToQb: (pipedriveId: string) => `map:pd-to-qb:${pipedriveId}`,
+  /** QuickBooks OAuth tokens */
+  qbOAuthTokens: () => 'oauth:quickbooks:tokens',
 } as const;
 
 // TTLs in seconds
@@ -164,4 +168,55 @@ export async function wasCreatedByMiddleware(pipedriveId: string): Promise<boole
   const redis = getRedis();
   const exists = await redis.exists(KEYS.middlewareCreated(pipedriveId));
   return exists === 1;
+}
+
+// ============================================
+// QUICKBOOKS INTEGRATION
+// ============================================
+
+export interface QBOAuthTokens {
+  accessToken: string;
+  refreshToken: string;
+  expiresAt: number; // Unix timestamp
+  refreshTokenExpiresAt: number; // Unix timestamp
+}
+
+/**
+ * Store QuickBooks OAuth tokens
+ * Note: Upstash Redis auto-serializes objects, so we store directly
+ */
+export async function storeQBTokens(tokens: QBOAuthTokens): Promise<void> {
+  const redis = getRedis();
+  await redis.set(KEYS.qbOAuthTokens(), tokens);
+  logger.debug('Stored QuickBooks OAuth tokens');
+}
+
+/**
+ * Get QuickBooks OAuth tokens
+ * Note: Upstash Redis auto-deserializes, so we get the object directly
+ */
+export async function getQBTokens(): Promise<QBOAuthTokens | null> {
+  const redis = getRedis();
+  const data = await redis.get<QBOAuthTokens>(KEYS.qbOAuthTokens());
+  return data || null;
+}
+
+/**
+ * Store Pipedrive -> QuickBooks Customer ID mapping
+ */
+export async function storePipedriveToQbMapping(
+  pipedriveId: string,
+  qbCustomerId: string
+): Promise<void> {
+  const redis = getRedis();
+  await redis.set(KEYS.mapPipedriveToQb(pipedriveId), qbCustomerId, { ex: TTL.mapping });
+  logger.debug('Stored Pipedrive->QB mapping', { pipedriveId, qbCustomerId });
+}
+
+/**
+ * Get QuickBooks Customer ID from Pipedrive Person ID
+ */
+export async function getQbCustomerIdFromPipedrive(pipedriveId: string): Promise<string | null> {
+  const redis = getRedis();
+  return redis.get(KEYS.mapPipedriveToQb(pipedriveId));
 }

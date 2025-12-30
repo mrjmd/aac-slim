@@ -24,6 +24,13 @@ interface EnvConfig {
   gemini: {
     apiKey: string | null; // Optional - entity extraction disabled if missing
   };
+  // QuickBooks Online
+  quickbooks: {
+    clientId: string;
+    clientSecret: string;
+    realmId: string;
+    redirectUri: string;
+  };
   // Notifications
   notifications: {
     alertPhoneNumber: string; // Phone to receive lead alerts
@@ -66,6 +73,12 @@ export function getEnv(): EnvConfig {
     },
     gemini: {
       apiKey: process.env.GEMINI_API_KEY || null,
+    },
+    quickbooks: {
+      clientId: requireEnv('QUICKBOOKS_CLIENT_ID'),
+      clientSecret: requireEnv('QUICKBOOKS_CLIENT_SECRET'),
+      realmId: requireEnv('QUICKBOOKS_REALM_ID'),
+      redirectUri: requireEnv('QUICKBOOKS_REDIRECT_URI'),
     },
     notifications: {
       alertPhoneNumber: requireEnv('ALERT_PHONE_NUMBER'),

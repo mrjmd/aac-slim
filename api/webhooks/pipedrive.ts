@@ -2,17 +2,18 @@
  * Pipedrive Webhook Handler
  *
  * Triggers: person.added, person.updated
- * Action: Sync contact to Quo (OpenPhone)
- *
- * Loop Prevention: Ignores events from the system user (our own API calls)
+ * Actions:
+ *   1. Sync contact to Quo (OpenPhone)
+ *   2. Sync contact to QuickBooks Online
  */
 
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { logger } from '../../src/lib/logger.js';
 import { normalizePhone } from '../../src/lib/phone.js';
-import { markEventProcessed, storeIdMapping, getQuoIdFromPipedrive, storePhoneMapping } from '../../src/lib/redis.js';
+import { markEventProcessed, storeIdMapping, getQuoIdFromPipedrive, storePhoneMapping, getQbCustomerIdFromPipedrive, storePipedriveToQbMapping } from '../../src/lib/redis.js';
 import { searchContactByPhone, createContact, updateContact, parseFullName } from '../../src/clients/quo.js';
 import { getOrganization, getPerson } from '../../src/clients/pipedrive.js';
+import { isQuickBooksConnected, searchCustomerByEmail, searchCustomerByName, createCustomer } from '../../src/clients/quickbooks.js';
 
 const log = logger.child({ handler: 'pipedrive-webhook' });
 
@@ -209,10 +210,80 @@ export default async function handler(
       }
     }
 
+    // ============================================
+    // SYNC TO QUICKBOOKS
+    // ============================================
+    let qbCustomerId: string | null = null;
+
+    // Only sync if QuickBooks is connected
+    const qbConnected = await isQuickBooksConnected();
+    if (qbConnected) {
+      try {
+        // Check if we already have a mapping
+        qbCustomerId = await getQbCustomerIdFromPipedrive(String(data.id));
+
+        if (!qbCustomerId) {
+          // Get email for QuickBooks lookup
+          const emails = data.emails as Array<{ value: string; primary: boolean; label: string }> | undefined;
+          const primaryEmail = emails?.find(e => e.primary)?.value || emails?.[0]?.value;
+
+          // Search by email first (most reliable)
+          let existingCustomer = primaryEmail
+            ? await searchCustomerByEmail(primaryEmail)
+            : null;
+
+          // If not found by email, try by display name
+          if (!existingCustomer && personName && personName !== 'Unknown') {
+            existingCustomer = await searchCustomerByName(personName);
+          }
+
+          if (existingCustomer && existingCustomer.Id) {
+            // Link existing customer
+            qbCustomerId = existingCustomer.Id;
+            await storePipedriveToQbMapping(String(data.id), qbCustomerId);
+            log.info('Linked existing QuickBooks customer', {
+              pipedriveId: data.id,
+              qbCustomerId,
+            });
+          } else {
+            // Create new customer in QuickBooks
+            const newCustomer = await createCustomer({
+              displayName: personName,
+              firstName,
+              lastName: lastName || undefined,
+              companyName: company,
+              email: primaryEmail,
+              phone: e164Phone,
+            });
+
+            qbCustomerId = newCustomer.Id || null;
+            if (qbCustomerId) {
+              await storePipedriveToQbMapping(String(data.id), qbCustomerId);
+            }
+            log.info('Created new QuickBooks customer', {
+              pipedriveId: data.id,
+              qbCustomerId,
+            });
+          }
+        } else {
+          log.debug('QuickBooks customer already linked', {
+            pipedriveId: data.id,
+            qbCustomerId,
+          });
+        }
+      } catch (qbError) {
+        // Don't fail the webhook if QuickBooks sync fails
+        log.error('QuickBooks sync failed', qbError as Error, { pipedriveId: data.id });
+      }
+    } else {
+      log.debug('QuickBooks not connected, skipping sync');
+    }
+
     res.status(200).json({
       status: 'synced',
       pipedriveId: data.id,
       quoId: quoContactId,
+      qbCustomerId,
     });
   } catch (error) {
     log.error('Webhook processing failed', error as Error, { eventId });

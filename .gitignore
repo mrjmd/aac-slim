@@ -25,5 +25,8 @@ npm-debug.log*
 # Test coverage
 coverage/
 
+# Data exports (contain PII)
+*.csv
+
 # TypeScript cache
 *.tsbuildinfo

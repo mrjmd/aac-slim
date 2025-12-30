@@ -2,12 +2,16 @@
 
 This document outlines the strategy for adding lightweight automated tests to the AAC Middleware after manual verification is complete.
 
+## Primary Goal
+
+**Prevent regressions.** Once manual testing confirms everything works, automated tests lock in that behavior so future changes don't accidentally break things.
+
 ## Philosophy
 
-- **Lightweight over comprehensive**: We're a small integration layer, not a complex application
+- **Regression prevention, not comprehensive coverage**: Test the paths we know work
+- **Simple and fast**: If a test is complex, it's probably not worth writing
 - **Mock external APIs**: Never hit real Pipedrive/Quo/Gemini in tests
-- **Focus on business logic**: Test the transformation and decision logic, not the HTTP layer
-- **Fast execution**: Tests should run in seconds, not minutes
+- **Run on every change**: Tests must complete in seconds
 
 ## Test Structure
 
@@ -304,19 +308,20 @@ describe.skip('E2E: Full sync flow', () => {
 
 ## Implementation Order
 
-1. **Phase 1** (1-2 hours): Add unit tests for pure functions
-   - Validates core logic works correctly
-   - No dependencies to mock
-   - Immediate confidence boost
+After manual testing confirms everything works:
 
-2. **Phase 2** (2-4 hours): Add integration tests with mocks
-   - Tests webhook handler logic
-   - Catches regressions in business rules
-   - Run on every commit
+1. **Phase 1** (~1 hour): Unit tests for pure functions
+   - Phone normalization, name parsing
+   - No mocking needed, easy wins
 
-3. **Phase 3** (optional): E2E tests for critical paths
-   - Only after manual testing confirms everything works
-   - Run manually or in nightly CI
+2. **Phase 2** (~2 hours): One happy-path test per webhook
+   - Quo webhook: inbound SMS creates contact + extracts entities
+   - Pipedrive webhook: new contact syncs to Quo
+   - Google Ads webhook: lead creates contact + sends SMS
+
+3. **Phase 3** (if needed): Add tests when bugs are found
+   - If a regression happens, write a test that would have caught it
+   - Don't write tests speculatively
 
 ---
 
@@ -340,10 +345,11 @@ Future: Add GitHub Actions workflow to run tests on PR.
 
 ## Success Criteria
 
-Before considering automated testing "done":
+Automated testing is "done" when:
 
-- [ ] All unit tests pass
-- [ ] Integration tests cover happy paths for each webhook
-- [ ] Integration tests cover key error cases (invalid auth, missing data)
 - [ ] Tests run in <10 seconds
-- [ ] Coverage >60% for webhook handlers
+- [ ] Each webhook has at least one "happy path" test
+- [ ] Key decision points are covered (e.g., "skip if no phone", "skip if outbound")
+- [ ] Running `npm test` before deploy gives confidence nothing broke
+
+Coverage percentage doesn't matter. If the tests catch regressions, they're doing their job.

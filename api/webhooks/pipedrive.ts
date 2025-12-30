@@ -10,7 +10,7 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { logger } from '../../src/lib/logger.js';
 import { normalizePhone } from '../../src/lib/phone.js';
-import { markEventProcessed, storeIdMapping, getQuoIdFromPipedrive, storePhoneMapping, wasCreatedByMiddleware } from '../../src/lib/redis.js';
+import { markEventProcessed, storeIdMapping, getQuoIdFromPipedrive, storePhoneMapping } from '../../src/lib/redis.js';
 import { searchContactByPhone, createContact, updateContact, parseFullName } from '../../src/clients/quo.js';
 import { getOrganization, getPerson } from '../../src/clients/pipedrive.js';
 
@@ -101,20 +101,11 @@ export default async function handler(
 
   try {
     // ============================================
-    // LOOP PREVENTION
-    // ============================================
-    // Only skip if OUR middleware created this contact (to prevent Quo→Pipedrive→Quo loop)
-    // Other API sources (ZoomInfo, Zapier, etc.) should still sync to Quo
-    const wasCreatedByUs = await wasCreatedByMiddleware(String(data.id));
-    if (wasCreatedByUs) {
-      log.debug('Skipping contact we just created to prevent loop', { eventId, personId: data.id });
-      res.status(200).json({ status: 'ignored', reason: 'created_by_middleware' });
-      return;
-    }
-
-    // ============================================
     // DEDUPLICATION
     // ============================================
+    // Note: No loop prevention needed here. Both webhooks search before creating,
+    // so duplicates are naturally prevented. Quo API doesn't fire webhooks for
+    // API-created contacts anyway.
     const isNew = await markEventProcessed('pipedrive', eventId);
     if (!isNew) {
       log.info('Duplicate event ignored', { eventId });

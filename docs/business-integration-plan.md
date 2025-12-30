@@ -221,22 +221,34 @@ When a new Google Ads lead is created or matched:
 > [!NOTE]
 > **Phone Format Bonus:** Google Ads sends phone numbers in E.164 format (e.g., `+15551234567`), matching our existing normalization standard. No conversion needed.
 
-#### 1.3 The AI Listener (The "Smart Ingest")
+#### 1.3 The AI Listener (Entity Extraction)
 
-**Concept:** AI parses unstructured text/audio to structured data, removing the need for manual Quo contact creation.
+**Concept:** AI parses unstructured text from SMS and call transcripts to extract contact information, automatically enriching Pipedrive contacts.
 
-**Trigger:** `message.received` OR `call.transcript.completed`
+**Trigger:** `message.received` OR `transcript.completed` (inbound only)
+
+**Smart Rules (Cost Optimization):**
+- Only process inbound messages (skip outbound)
+- Skip trivial messages (<10 characters)
+- Skip transcripts with no content
+- Don't overwrite existing data of same type (incremental enrichment only)
 
 **Process:**
-1. Send transcript/text to LLM (Gemini 2.5 Flash)
-2. Prompt: "Extract the following entities: First Name, Last Name, Street Address, Email, Intent (Booking/Inquiry). Return JSON."
-
-> [!WARNING]
-> **AI Confidence Scores:** Gemini does not return confidence scores by default. The "90% confidence" threshold mentioned below cannot be implemented as written. Instead, use Gemini's structured output (JSON mode) and validate the returned fields are non-empty. Consider adding a `"confidence": "high"|"medium"|"low"` field to the prompt for the model to self-assess.
+1. Filter: Check if message/transcript qualifies for processing
+2. Send text to Gemini 2.0 Flash for entity extraction
+3. Prompt extracts: First Name, Last Name, Full Name, Email, Street Address, City, State, ZIP
+4. Model self-assesses confidence as "high", "medium", or "low"
 
 **Action:**
-- If high confidence (>90%) & Contact is "Unknown": Update the Pipedrive Contact Name/Address automatically
-- If intent = "Booking": Create a "Task" in Pipedrive for the Salesperson: "Booking Request Detected"
+- Extract name: Update Pipedrive contact if current name is "Unknown Lead..."
+- Extract email: Add to Pipedrive contact only if no email exists
+- Address fields: Logged for reference (custom field support planned)
+
+**Incremental Data Philosophy:**
+Data comes in pieces over time. Someone might text "Hi, this is John" then later "My email is john@example.com". The AI Listener processes each message and adds new fields without overwriting known good data.
+
+> [!NOTE]
+> **Intent Detection (Deferred):** Detecting booking intent from messages (e.g., "I'd like to schedule an estimate") and auto-creating Pipedrive tasks is planned for a future iteration. The current implementation focuses solely on entity extraction.
 
 #### 1.4 The Campaign Manager (Cold Texting)
 
@@ -374,13 +386,14 @@ The system to batch-generate branded assets.
 
 - [x] Server Setup: Deploy Node.js middleware on Vercel
 - [x] Module 1.1: Pipedrive <-> Quo bidirectional sync (Name, Phone, Company, Job Title)
-- [ ] Module 1.2: Google Ads Lead Form -> Pipedrive integration
+- [x] Module 1.2: Google Ads Lead Form -> Pipedrive integration (with SMS alerts)
+- [x] Module 1.3: AI Listener - Entity extraction from inbound messages/transcripts
 - [ ] Financial v1: Build Pipedrive -> QuickBooks Contact creation
 - [x] Compliance: Register for A2P 10DLC (Completed)
 
 ### Phase 2: The "Walk" (Intelligence & Sales)
 
-- [ ] AI Listener: Implement LLM parsing for Quo transcripts
+- [ ] AI Listener v2: Intent detection (booking requests -> Pipedrive tasks)
 - [ ] Campaign App: Build simple UI for CSV upload + Text Blasting
 - [ ] Estimate Sync: QuickBooks Estimate -> Pipedrive Deal
 - [ ] Marketing v1: Build the Content Strategist & Asset Factory scripts

@@ -20,6 +20,10 @@ interface EnvConfig {
   googleAds: {
     webhookKey: string | null; // Optional until configured
   };
+  // Gemini AI
+  gemini: {
+    apiKey: string | null; // Optional - entity extraction disabled if missing
+  };
   // Notifications
   notifications: {
     alertPhoneNumber: string; // Phone to receive lead alerts
@@ -59,6 +63,9 @@ export function getEnv(): EnvConfig {
     },
     googleAds: {
       webhookKey: process.env.GOOGLE_ADS_WEBHOOK_KEY || null,
+    },
+    gemini: {
+      apiKey: process.env.GEMINI_API_KEY || null,
     },
     notifications: {
       alertPhoneNumber: requireEnv('ALERT_PHONE_NUMBER'),

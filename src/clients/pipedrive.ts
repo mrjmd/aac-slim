@@ -257,6 +257,103 @@ export function getPrimaryPhone(person: PipedrivePerson): string | null {
 }
 
 /**
+ * Incrementally update a person - only add new fields, don't overwrite existing
+ * Used by AI Listener to add extracted data without overwriting known good data
+ */
+export async function updatePersonIncremental(
+  id: number,
+  updates: {
+    name?: string;
+    phone?: string;
+    email?: string;
+    address?: string;
+    city?: string;
+    state?: string;
+    zipCode?: string;
+  }
+): Promise<{ updated: boolean; fields: string[] }> {
+  // First get the current person data
+  const person = await getPerson(id);
+  if (!person) {
+    log.warn('Cannot update non-existent person', { personId: id });
+    return { updated: false, fields: [] };
+  }
+
+  const body: Record<string, unknown> = {};
+  const updatedFields: string[] = [];
+
+  // Only update name if current name is "Unknown Lead..." pattern
+  if (updates.name && person.name.startsWith('Unknown Lead')) {
+    body.name = updates.name;
+    updatedFields.push('name');
+  }
+
+  // Add phone if person has no phone
+  const currentPhone = getPrimaryPhone(person);
+  if (updates.phone && !currentPhone) {
+    body.phone = [{ value: updates.phone, primary: true }];
+    updatedFields.push('phone');
+  }
+
+  // Only add email if person has no email
+  const currentEmail = getPrimaryEmail(person);
+  if (updates.email && !currentEmail) {
+    body.email = [{ value: updates.email, primary: true }];
+    updatedFields.push('email');
+  }
+
+  // Personal address field - custom field with hash key
+  // Main field key: 5fc7cf5d8c890fe2f7062aaabe1e9b416c851511
+  const ADDR_KEY = '5fc7cf5d8c890fe2f7062aaabe1e9b416c851511';
+
+  if (updates.address || updates.city || updates.state || updates.zipCode) {
+    // Set individual subfields for better data structure
+    if (updates.address) {
+      body[`${ADDR_KEY}_route`] = updates.address;
+      updatedFields.push('street');
+    }
+    if (updates.city) {
+      body[`${ADDR_KEY}_locality`] = updates.city;
+      updatedFields.push('city');
+    }
+    if (updates.state) {
+      body[`${ADDR_KEY}_admin_area_level_1`] = updates.state;
+      updatedFields.push('state');
+    }
+    if (updates.zipCode) {
+      body[`${ADDR_KEY}_postal_code`] = updates.zipCode;
+      updatedFields.push('zip');
+    }
+
+    // Also build formatted address for the main field
+    const addressParts = [
+      updates.address,
+      updates.city,
+      updates.state && updates.zipCode ? `${updates.state} ${updates.zipCode}` : (updates.state || updates.zipCode),
+    ].filter(Boolean);
+
+    if (addressParts.length > 0) {
+      body[ADDR_KEY] = addressParts.join(', ');
+    }
+  }
+
+  // Nothing to update
+  if (Object.keys(body).length === 0) {
+    log.debug('No incremental updates needed', { personId: id });
+    return { updated: false, fields: [] };
+  }
+
+  log.info('Incremental person update', { personId: id, fields: updatedFields });
+
+  await pipedriveRequest<PipedrivePerson>(`/persons/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify(body),
+  });
+
+  return { updated: true, fields: updatedFields };
+}
+
+/**
  * Extract primary email from Pipedrive person
  */
 export function getPrimaryEmail(person: PipedrivePerson): string | null {

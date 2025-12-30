@@ -11,12 +11,13 @@ Lightweight middleware connecting business SaaS tools (Pipedrive, Quo/OpenPhone,
 ```
 api/webhooks/           # Independent modules (no cross-imports)
 ├── pipedrive.ts        # Module 1.1a: Pipedrive → Quo sync
-├── quo.ts              # Module 1.1b: Quo → Pipedrive sync
+├── quo.ts              # Module 1.1b: Quo → Pipedrive sync + 1.3 AI entity extraction
 └── google-ads.ts       # Module 1.2: Google Ads → Pipedrive
 
 src/clients/            # Reusable API clients
 ├── pipedrive.ts        # Pipedrive CRUD operations
-└── quo.ts              # Quo/OpenPhone CRUD operations
+├── quo.ts              # Quo/OpenPhone CRUD operations
+└── gemini.ts           # Gemini AI for entity extraction (Module 1.3)
 
 src/lib/                # Shared utilities
 ├── env.ts              # Environment config

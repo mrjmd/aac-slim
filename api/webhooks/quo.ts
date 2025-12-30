@@ -16,8 +16,9 @@ import crypto from 'crypto';
 import { getEnv } from '../../src/lib/env.js';
 import { logger } from '../../src/lib/logger.js';
 import { normalizePhone } from '../../src/lib/phone.js';
-import { markEventProcessed, getPipedriveIdFromPhone, storePhoneMapping, markCreatedByMiddleware } from '../../src/lib/redis.js';
-import { searchPersonByPhone, createPerson, logActivity } from '../../src/clients/pipedrive.js';
+import { markEventProcessed, getPipedriveIdFromPhone, storePhoneMapping } from '../../src/lib/redis.js';
+import { searchPersonByPhone, createPerson, logActivity, updatePersonIncremental } from '../../src/clients/pipedrive.js';
+import { extractEntities, hasUsefulEntities } from '../../src/clients/gemini.js';
 
 const log = logger.child({ handler: 'quo-webhook' });
 
@@ -76,6 +77,32 @@ function verifySignature(
   } catch {
     return false;
   }
+}
+
+// Minimum message length for AI processing (skip trivial messages)
+const MIN_MESSAGE_LENGTH = 10;
+
+/**
+ * Check if a message should be processed by AI for entity extraction
+ * Rules: Only inbound messages/transcripts with sufficient content
+ */
+function shouldProcessForAI(payload: QuoWebhookPayload): boolean {
+  // Only process inbound messages and transcripts
+  if (payload.type === 'message.delivered') return false; // Outbound SMS
+  if (payload.type === 'call.completed') return false; // Call without transcript
+
+  // For transcripts, check direction
+  if (payload.type === 'transcript.completed') {
+    if (payload.data.direction === 'outgoing') return false;
+  }
+
+  // Get the text content
+  const text = payload.data.body || '';
+
+  // Skip trivial messages
+  if (text.length < MIN_MESSAGE_LENGTH) return false;
+
+  return true;
 }
 
 /**
@@ -231,10 +258,6 @@ export default async function handler(
       pipedrivePersonId = newPerson.id;
       await storePhoneMapping(e164Phone, String(pipedrivePersonId));
 
-      // Mark this contact as created by our middleware to prevent loop:
-      // Pipedrive webhook will fire but should skip syncing back to Quo
-      await markCreatedByMiddleware(String(pipedrivePersonId));
-
       log.info('Created Unknown Lead', { phone: e164Phone, personId: pipedrivePersonId });
     }
 
@@ -280,8 +303,6 @@ export default async function handler(
     }
 
     if (payload.type === 'transcript.completed') {
-      // For now, just log that we received a transcript
-      // Module 1.2 (AI Listener) will process this for entity extraction
       const transcript = payload.data.body || '(no transcript)';
 
       await logActivity(pipedrivePersonId, 'call', {
@@ -290,6 +311,60 @@ export default async function handler(
       });
 
       log.info('Logged transcript activity', { personId: pipedrivePersonId });
+    }
+
+    // ============================================
+    // AI ENTITY EXTRACTION (Module 1.3)
+    // ============================================
+    if (shouldProcessForAI(payload)) {
+      const textContent = payload.data.body || '';
+      log.info('Processing for AI entity extraction', {
+        personId: pipedrivePersonId,
+        type: payload.type,
+        textLength: textContent.length,
+      });
+
+      try {
+        const entities = await extractEntities(textContent);
+
+        if (hasUsefulEntities(entities)) {
+          // Build name from extracted entities
+          let extractedName: string | undefined;
+          if (entities!.fullName) {
+            extractedName = entities!.fullName;
+          } else if (entities!.firstName && entities!.lastName) {
+            extractedName = `${entities!.firstName} ${entities!.lastName}`;
+          } else if (entities!.firstName) {
+            extractedName = entities!.firstName;
+          } else if (entities!.lastName) {
+            extractedName = entities!.lastName;
+          }
+
+          // Incrementally update Pipedrive (only add new fields)
+          const updateResult = await updatePersonIncremental(pipedrivePersonId, {
+            name: extractedName,
+            phone: e164Phone,
+            email: entities!.email || undefined,
+            address: entities!.streetAddress || undefined,
+            city: entities!.city || undefined,
+            state: entities!.state || undefined,
+            zipCode: entities!.zipCode || undefined,
+          });
+
+          if (updateResult.updated) {
+            log.info('AI extracted and updated contact', {
+              personId: pipedrivePersonId,
+              fields: updateResult.fields,
+              confidence: entities!.confidence,
+            });
+          }
+        }
+      } catch (error) {
+        // Don't fail the webhook if AI extraction fails
+        log.error('AI entity extraction failed', error as Error, {
+          personId: pipedrivePersonId,
+        });
+      }
     }
 
     res.status(200).json({

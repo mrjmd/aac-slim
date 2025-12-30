@@ -1,4 +1,4 @@
-# Module 1.5: Outbound SMS Campaign Manager
+# Module 3: Outbound SMS Campaign Manager
 
 **Version:** 1.0
 **Date:** December 30, 2024

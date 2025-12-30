@@ -10,6 +10,7 @@ This directory contains step-by-step manual testing procedures for each module o
 | 1.2 | Google Ads Lead Form Integration | [module-1.2-google-ads.md](./module-1.2-google-ads.md) |
 | 1.3 | AI Listener (Entity Extraction) | [module-1.3-ai-listener.md](./module-1.3-ai-listener.md) |
 | 1.4 | Pipedrive → QuickBooks Sync | [module-1.4-quickbooks.md](./module-1.4-quickbooks.md) |
+| 2.0 | Attribution Engine & Commission Reports | [module-2-attribution.md](./module-2-attribution.md) |
 
 ## Prerequisites
 

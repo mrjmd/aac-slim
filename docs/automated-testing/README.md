@@ -20,13 +20,16 @@ tests/
 ├── unit/                    # Pure function tests (no mocking needed)
 │   ├── phone.test.ts        # Phone normalization
 │   ├── name-parser.test.ts  # Name splitting logic
-│   └── gemini.test.ts       # Entity extraction parsing
+│   ├── gemini.test.ts       # Entity extraction parsing
+│   ├── report-generator.test.ts  # Commission report formatting
+│   └── attribution.test.ts  # Commission calculation
 │
 ├── integration/             # Tests with mocked external APIs
 │   ├── quo-webhook.test.ts  # Quo webhook handler logic
 │   ├── pipedrive-webhook.test.ts
 │   ├── google-ads-webhook.test.ts
-│   └── quickbooks.test.ts   # QuickBooks OAuth & customer sync
+│   ├── quickbooks.test.ts   # QuickBooks OAuth & customer sync
+│   └── attribution.test.ts  # Full attribution flow
 │
 └── mocks/                   # Shared mock implementations
     ├── pipedrive.ts
@@ -116,6 +119,135 @@ describe('hasUsefulEntities', () => {
 
   it('returns false for null', () => {
     expect(hasUsefulEntities(null)).toBe(false);
+  });
+});
+```
+
+### 1.4 Commission Calculation (`src/lib/attribution.ts`)
+
+```typescript
+// tests/unit/attribution.test.ts
+describe('isCommissionedSalesRep', () => {
+  it('returns true for configured salesperson', () => {
+    expect(isCommissionedSalesRep(24313124)).toBe(true); // Edward Crowell
+  });
+
+  it('returns false for non-configured user', () => {
+    expect(isCommissionedSalesRep(99999)).toBe(false);
+  });
+
+  it('returns false for owner (not a salesperson)', () => {
+    expect(isCommissionedSalesRep(24313113)).toBe(false); // Matt Davis
+  });
+});
+
+describe('getCommissionRate', () => {
+  it('returns configured rate for salesperson', () => {
+    expect(getCommissionRate(24313124)).toBe(0.20);
+  });
+
+  it('returns 0 for non-configured user', () => {
+    expect(getCommissionRate(99999)).toBe(0);
+  });
+});
+```
+
+### 1.5 Report Generation (`src/lib/report-generator.ts`)
+
+```typescript
+// tests/unit/report-generator.test.ts
+describe('generateSmsSummary', () => {
+  it('returns no commissions message when results empty', () => {
+    const data = { startDate: '2025-12-01', endDate: '2025-12-31', results: [] };
+    expect(generateSmsSummary(data)).toBe('Dec commissions: No commissions owed.');
+  });
+
+  it('generates compact summary for single salesperson', () => {
+    const data = {
+      startDate: '2025-12-01',
+      endDate: '2025-12-31',
+      results: [
+        { salesRepId: 1, salesRepName: 'Ed Crowell', commissionAmount: 1000, invoiceAmount: 5000, ... },
+        { salesRepId: 1, salesRepName: 'Ed Crowell', commissionAmount: 500, invoiceAmount: 2500, ... },
+      ]
+    };
+    expect(generateSmsSummary(data)).toBe('Dec commissions: Ed $1,500 (2 jobs)');
+  });
+
+  it('stays under 160 characters', () => {
+    // Test with multiple salespeople
+    const data = { ... };
+    expect(generateSmsSummary(data).length).toBeLessThanOrEqual(160);
+  });
+});
+
+describe('generateHtmlReport', () => {
+  it('shows no commissions message when results empty', () => {
+    const data = { startDate: '2025-12-01', endDate: '2025-12-31', results: [] };
+    const html = generateHtmlReport(data);
+    expect(html).toContain('No commissions owed in this period');
+  });
+
+  it('includes period in header', () => {
+    const data = { startDate: '2025-12-01', endDate: '2025-12-31', results: [] };
+    const html = generateHtmlReport(data);
+    expect(html).toContain('Dec 1, 2025 - Dec 31, 2025');
+  });
+
+  it('generates table for results', () => {
+    const data = {
+      startDate: '2025-12-01',
+      endDate: '2025-12-31',
+      results: [{
+        invoiceNumber: '1234',
+        customerName: 'John Doe',
+        invoiceDate: '2025-12-15',
+        invoiceAmount: 5000,
+        commissionAmount: 1000,
+        salesRepId: 1,
+        salesRepName: 'Ed Crowell',
+        commissionRate: 0.20,
+        ...
+      }]
+    };
+    const html = generateHtmlReport(data);
+    expect(html).toContain('1234'); // Invoice number
+    expect(html).toContain('John Doe'); // Customer
+    expect(html).toContain('$5,000.00'); // Amount
+    expect(html).toContain('$1,000.00'); // Commission
+    expect(html).toContain('Ed Crowell'); // Sales rep
+  });
+});
+
+describe('generateJsonSummary', () => {
+  it('calculates totals correctly', () => {
+    const data = {
+      startDate: '2025-12-01',
+      endDate: '2025-12-31',
+      results: [
+        { invoiceAmount: 5000, commissionAmount: 1000, salesRepId: 1, salesRepName: 'Ed', commissionRate: 0.2, ... },
+        { invoiceAmount: 2500, commissionAmount: 500, salesRepId: 1, salesRepName: 'Ed', commissionRate: 0.2, ... },
+      ]
+    };
+    const summary = generateJsonSummary(data);
+    expect(summary.totalInvoiceCount).toBe(2);
+    expect(summary.totalInvoiceAmount).toBe(7500);
+    expect(summary.totalCommission).toBe(1500);
+  });
+
+  it('groups by salesperson', () => {
+    const data = {
+      startDate: '2025-12-01',
+      endDate: '2025-12-31',
+      results: [
+        { salesRepId: 1, salesRepName: 'Ed', invoiceAmount: 5000, commissionAmount: 1000, ... },
+        { salesRepId: 2, salesRepName: 'Jane', invoiceAmount: 3000, commissionAmount: 450, ... },
+      ]
+    };
+    const summary = generateJsonSummary(data);
+    expect(summary.summaries).toHaveLength(2);
+    expect(summary.summaries[0].salesRepName).toBe('Ed');
+    expect(summary.summaries[1].salesRepName).toBe('Jane');
   });
 });
 ```
@@ -419,6 +551,188 @@ describe('QuickBooks Integration', () => {
 
       expect(mockQuickBooks.createCustomer).not.toHaveBeenCalled();
       expect(response.body.qbCustomerId).toBe('789');
+    });
+  });
+});
+```
+
+### 2.6 Attribution Engine Tests
+
+```typescript
+// tests/integration/attribution.test.ts
+describe('Attribution Engine', () => {
+  beforeEach(() => {
+    mockQuickBooks.reset();
+    mockPipedrive.reset();
+    mockRedis.reset();
+  });
+
+  describe('runAttribution', () => {
+    it('fetches paid invoices from QuickBooks', async () => {
+      mockQuickBooks.getPaidInvoices.mockResolvedValue([]);
+
+      await runAttribution('2025-12-01', '2025-12-31');
+
+      expect(mockQuickBooks.getPaidInvoices).toHaveBeenCalledWith('2025-12-01', '2025-12-31');
+    });
+
+    it('skips invoices without QB→PD mapping', async () => {
+      mockQuickBooks.getPaidInvoices.mockResolvedValue([
+        { Id: '123', CustomerRef: { value: '456', name: 'Test' }, TotalAmt: 1000, Balance: 0 }
+      ]);
+      mockRedis.getPipedriveIdFromQb.mockResolvedValue(null);
+
+      const result = await runAttribution('2025-12-01', '2025-12-31');
+
+      expect(result.unattributed).toHaveLength(1);
+      expect(result.unattributed[0].reason).toContain('No Pipedrive mapping');
+    });
+
+    it('skips invoices where owner is not commissioned', async () => {
+      mockQuickBooks.getPaidInvoices.mockResolvedValue([
+        { Id: '123', CustomerRef: { value: '456', name: 'Test' }, TotalAmt: 1000, Balance: 0, TxnDate: '2025-12-15' }
+      ]);
+      mockRedis.getPipedriveIdFromQb.mockResolvedValue('789');
+      mockPipedrive.getPerson.mockResolvedValue({
+        id: 789,
+        name: 'Test Customer',
+        owner_id: { id: 99999, name: 'Non-Commissioned User' } // Not in COMMISSION_RATES
+      });
+      mockPipedrive.getPersonReferredBy.mockResolvedValue(null);
+
+      const result = await runAttribution('2025-12-01', '2025-12-31');
+
+      expect(result.attributed).toBe(0);
+    });
+
+    it('calculates commission for commissioned salesperson', async () => {
+      mockQuickBooks.getPaidInvoices.mockResolvedValue([
+        { Id: '123', CustomerRef: { value: '456', name: 'Test' }, TotalAmt: 5000, Balance: 0, TxnDate: '2025-12-15' }
+      ]);
+      mockRedis.getPipedriveIdFromQb.mockResolvedValue('789');
+      mockPipedrive.getPerson.mockResolvedValue({
+        id: 789,
+        name: 'Test Customer',
+        owner_id: { id: 24313124, name: 'Edward Crowell' } // Commissioned at 20%
+      });
+      mockPipedrive.getPersonReferredBy.mockResolvedValue(null);
+      mockPipedrive.getPipedriveUser.mockResolvedValue({ id: 24313124, name: 'Edward Crowell' });
+
+      const result = await runAttribution('2025-12-01', '2025-12-31');
+
+      expect(result.attributed).toBe(1);
+      expect(result.results[0].commissionAmount).toBe(1000); // 5000 * 0.20
+      expect(result.results[0].salesRepName).toBe('Edward Crowell');
+    });
+
+    it('traverses referral chain to find salesperson', async () => {
+      mockQuickBooks.getPaidInvoices.mockResolvedValue([
+        { Id: '123', CustomerRef: { value: '456', name: 'Customer' }, TotalAmt: 5000, Balance: 0, TxnDate: '2025-12-15' }
+      ]);
+      mockRedis.getPipedriveIdFromQb.mockResolvedValue('100'); // Customer
+
+      // Customer → referred by Agent → referred by Salesperson
+      mockPipedrive.getPersonReferredBy
+        .mockResolvedValueOnce(200) // Customer referred by Agent
+        .mockResolvedValueOnce(300) // Agent referred by Salesperson
+        .mockResolvedValueOnce(null); // Salesperson has no referrer
+
+      mockPipedrive.getPerson.mockResolvedValue({
+        id: 300,
+        name: 'Top of Chain',
+        owner_id: { id: 24313124, name: 'Edward Crowell' }
+      });
+      mockPipedrive.getPipedriveUser.mockResolvedValue({ id: 24313124, name: 'Edward Crowell' });
+
+      const result = await runAttribution('2025-12-01', '2025-12-31');
+
+      expect(result.results[0].referralChain).toEqual([100, 200, 300]);
+      expect(result.results[0].salesRepName).toBe('Edward Crowell');
+    });
+
+    it('detects circular referral chains', async () => {
+      mockQuickBooks.getPaidInvoices.mockResolvedValue([
+        { Id: '123', CustomerRef: { value: '456', name: 'Customer' }, TotalAmt: 5000, Balance: 0, TxnDate: '2025-12-15' }
+      ]);
+      mockRedis.getPipedriveIdFromQb.mockResolvedValue('100');
+
+      // Circular: 100 → 200 → 100
+      mockPipedrive.getPersonReferredBy
+        .mockResolvedValueOnce(200)
+        .mockResolvedValueOnce(100); // Back to start!
+
+      const result = await runAttribution('2025-12-01', '2025-12-31');
+
+      // Should handle gracefully, not infinite loop
+      expect(result.errors).toBe(0);
+    });
+
+    it('skips already-processed invoices unless reprocess=true', async () => {
+      mockQuickBooks.getPaidInvoices.mockResolvedValue([
+        { Id: '123', CustomerRef: { value: '456', name: 'Test' }, TotalAmt: 5000, Balance: 0 }
+      ]);
+      mockRedis.wasInvoiceAttributed.mockResolvedValue(true);
+
+      const result = await runAttribution('2025-12-01', '2025-12-31');
+      expect(result.skipped).toBe(1);
+
+      const resultReprocess = await runAttribution('2025-12-01', '2025-12-31', { reprocess: true });
+      expect(resultReprocess.skipped).toBe(0);
+    });
+  });
+
+  describe('Commission Report Endpoint', () => {
+    it('returns 400 for missing date parameters', async () => {
+      const response = await request(app).get('/api/reports/commissions');
+      expect(response.status).toBe(400);
+      expect(response.body.error).toContain('Missing required parameters');
+    });
+
+    it('returns 400 for invalid date format', async () => {
+      const response = await request(app).get('/api/reports/commissions?startDate=invalid&endDate=2025-12-31');
+      expect(response.status).toBe(400);
+      expect(response.body.error).toContain('Invalid date format');
+    });
+
+    it('returns HTML by default', async () => {
+      mockRedis.getAttributionsByDateRange.mockResolvedValue([]);
+
+      const response = await request(app).get('/api/reports/commissions?startDate=2025-12-01&endDate=2025-12-31');
+
+      expect(response.status).toBe(200);
+      expect(response.headers['content-type']).toContain('text/html');
+      expect(response.text).toContain('AAC Commission Report');
+    });
+
+    it('returns JSON when format=json', async () => {
+      mockRedis.getAttributionsByDateRange.mockResolvedValue([]);
+
+      const response = await request(app).get('/api/reports/commissions?startDate=2025-12-01&endDate=2025-12-31&format=json');
+
+      expect(response.status).toBe(200);
+      expect(response.body.success).toBe(true);
+      expect(response.body.report).toBeDefined();
+    });
+
+    it('filters out non-commissioned salespeople from results', async () => {
+      mockRedis.getAttributionsByDateRange.mockResolvedValue([
+        { salesRepId: 24313124, salesRepName: 'Edward Crowell', commissionAmount: 1000, ... }, // Commissioned
+        { salesRepId: 99999, salesRepName: 'Other User', commissionAmount: 500, ... }, // Not commissioned
+      ]);
+
+      const response = await request(app).get('/api/reports/commissions?startDate=2025-12-01&endDate=2025-12-31&format=json');
+
+      expect(response.body.report.results).toHaveLength(1);
+      expect(response.body.report.results[0].salesRepName).toBe('Edward Crowell');
+    });
+
+    it('sends SMS when sendSms=true', async () => {
+      mockRedis.getAttributionsByDateRange.mockResolvedValue([]);
+      mockQuo.sendMessage.mockResolvedValue({ id: 'msg123' });
+
+      await request(app).get('/api/reports/commissions?startDate=2025-12-01&endDate=2025-12-31&sendSms=true');
+
+      expect(mockQuo.sendMessage).toHaveBeenCalled();
     });
   });
 });

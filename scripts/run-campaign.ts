@@ -31,6 +31,7 @@ const { values } = parseArgs({
     name: { type: 'string', short: 'n' },
     message: { type: 'string', short: 'm' },
     'dry-run': { type: 'boolean', default: false },
+    'skip-dedup': { type: 'boolean', default: false },
     help: { type: 'boolean', short: 'h' },
   },
 });
@@ -47,6 +48,7 @@ Options:
   --name, -n      Campaign name, e.g., "2025-01-15-Braintree" (required)
   --message, -m   Message template with {firstName} and {city} placeholders (required)
   --dry-run       Process CSV but don't queue messages or create contacts
+  --skip-dedup    Skip Quo conversation history check (for testing)
   --help, -h      Show this help
 
 Example:
@@ -70,6 +72,7 @@ if (!values.csv || !values.name || !values.message) {
 }
 
 const isDryRun = values['dry-run'];
+const skipDedup = values['skip-dedup'];
 
 /**
  * Personalize a message template with contact data
@@ -99,6 +102,9 @@ async function main() {
 
   if (isDryRun) {
     console.log('⚠️  DRY RUN MODE - No messages will be sent\n');
+  }
+  if (skipDedup) {
+    console.log('⚠️  SKIP DEDUP MODE - Will not check for existing conversations\n');
   }
 
   // Parse CSV
@@ -132,7 +138,11 @@ async function main() {
   const callbackUrl = `${process.env.VERCEL_URL || 'https://aac-middleware.vercel.app'}/api/campaign/send`;
 
   // Process contacts
-  console.log('🔍 Checking Quo for existing conversations...\n');
+  if (!skipDedup) {
+    console.log('🔍 Checking Quo for existing conversations...\n');
+  } else {
+    console.log('🔍 Processing contacts (dedup disabled)...\n');
+  }
 
   let queued = 0;
   let skipped = 0;
@@ -143,17 +153,19 @@ async function main() {
     const contact = contacts[i];
     const progress = `[${i + 1}/${contacts.length}]`;
 
-    // Check if we've already messaged this person via Quo
-    const hasConversation = await hasExistingConversation(contact.phone);
+    // Check if we've already messaged this person via Quo (unless --skip-dedup)
+    if (!skipDedup) {
+      const hasConversation = await hasExistingConversation(contact.phone);
 
-    if (hasConversation) {
-      console.log(`${progress} ⏭️  ${contact.phone} - Already contacted, skipping`);
-      skipped++;
+      if (hasConversation) {
+        console.log(`${progress} ⏭️  ${contact.phone} - Already contacted, skipping`);
+        skipped++;
 
-      if (!isDryRun) {
-        await incrementCampaignStats(campaignId, { skipped: 1 });
+        if (!isDryRun) {
+          await incrementCampaignStats(campaignId, { skipped: 1 });
+        }
+        continue;
       }
-      continue;
     }
 
     // Create Pipedrive contact (if not dry run)

@@ -37,6 +37,31 @@ interface QuoContactCreate {
   };
 }
 
+interface QuoPhoneNumber {
+  id: string;
+  number: string;
+  formattedNumber: string;
+  name: string;
+  users: Array<{ email: string; name: string; role: string }>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface QuoMessage {
+  id: string;
+  to: string[];
+  from: string;
+  text: string;
+  phoneNumberId: string;
+  direction: 'incoming' | 'outgoing';
+  status: 'queued' | 'sent' | 'delivered' | 'undelivered';
+  createdAt: string;
+  updatedAt: string;
+}
+
+// Cache for phone number ID lookup
+let cachedPhoneNumberId: string | null = null;
+
 /**
  * Make an authenticated request to Quo/OpenPhone API
  */
@@ -223,4 +248,72 @@ export async function sendMessage(
 
   log.info('Sent SMS', { messageId: result.data.id });
   return result.data;
+}
+
+/**
+ * Get the phone number ID for our Quo phone number
+ * Required for the messages API to check conversation history
+ * Result is cached after first call
+ */
+export async function getPhoneNumberId(): Promise<string> {
+  if (cachedPhoneNumberId) {
+    return cachedPhoneNumberId;
+  }
+
+  const env = getEnv();
+  const ourNumber = env.quo.phoneNumber;
+
+  log.debug('Looking up phone number ID', { phoneNumber: ourNumber });
+
+  const result = await quoRequest<{ data: QuoPhoneNumber[] }>('/phone-numbers');
+
+  const match = result.data?.find((pn) => pn.number === ourNumber);
+
+  if (!match) {
+    throw new Error(`Could not find phone number ID for ${ourNumber}`);
+  }
+
+  cachedPhoneNumberId = match.id;
+  log.debug('Found phone number ID', { phoneNumber: ourNumber, phoneNumberId: match.id });
+
+  return match.id;
+}
+
+/**
+ * Check if we have any existing conversation history with a phone number
+ * Used for deduplication - to avoid re-contacting people we've already messaged
+ * @param phone - E.164 formatted phone number to check
+ * @returns true if any messages exist (inbound or outbound), false otherwise
+ */
+export async function hasExistingConversation(phone: string): Promise<boolean> {
+  try {
+    const phoneNumberId = await getPhoneNumberId();
+
+    // Check for any messages with this participant
+    // maxResults=1 is enough - we just need to know if ANY exist
+    const params = new URLSearchParams({
+      phoneNumberId,
+      'participants[]': phone,
+      maxResults: '1',
+    });
+
+    const result = await quoRequest<{ data: QuoMessage[]; totalItems?: number }>(
+      `/messages?${params.toString()}`
+    );
+
+    const hasMessages = (result.totalItems ?? 0) > 0 || (result.data?.length ?? 0) > 0;
+
+    log.debug('Checked conversation history', {
+      phone,
+      hasExistingConversation: hasMessages,
+      totalItems: result.totalItems,
+    });
+
+    return hasMessages;
+  } catch (error) {
+    log.error('Failed to check conversation history', error as Error, { phone });
+    // On error, assume no existing conversation to avoid blocking the campaign
+    // But log it for investigation
+    return false;
+  }
 }

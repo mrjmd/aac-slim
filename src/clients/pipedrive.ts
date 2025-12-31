@@ -253,6 +253,67 @@ export async function createTask(
 }
 
 /**
+ * Contact data from Property Radar for campaign creation
+ */
+export interface CampaignContactData {
+  firstName: string;
+  lastName: string | null;
+  phone: string;
+  email?: string | null;
+  address?: string | null;
+  city?: string;
+  zip?: string | null;
+  campaignName: string;
+}
+
+/**
+ * Create or update a person for a campaign
+ * If person exists (by phone), just return them
+ * If not, create with campaign tracking info
+ */
+export async function createCampaignContact(
+  contact: CampaignContactData
+): Promise<{ person: PipedrivePerson; created: boolean }> {
+  // Check if person already exists
+  const existing = await searchPersonByPhone(contact.phone);
+  if (existing) {
+    log.info('Person already exists, skipping creation', {
+      personId: existing.id,
+      phone: contact.phone,
+    });
+    return { person: existing, created: false };
+  }
+
+  // Build the name
+  const name = contact.lastName
+    ? `${contact.firstName} ${contact.lastName}`
+    : contact.firstName;
+
+  // Build address string if we have components
+  let addressNote = '';
+  if (contact.address || contact.city || contact.zip) {
+    const parts = [contact.address, contact.city, contact.zip].filter(Boolean);
+    addressNote = parts.join(', ');
+  }
+
+  // Create the person with campaign tracking note
+  const note = [
+    `Lead Source: Property Radar Campaign`,
+    `Campaign: ${contact.campaignName}`,
+    addressNote ? `Property: ${addressNote}` : null,
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  const person = await createPerson(name, contact.phone, {
+    email: contact.email || undefined,
+    note,
+  });
+
+  return { person, created: true };
+}
+
+/**
  * Extract primary phone from Pipedrive person
  */
 export function getPrimaryPhone(person: PipedrivePerson): string | null {

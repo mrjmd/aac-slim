@@ -45,6 +45,14 @@ const KEYS = {
   attribution: (invoiceId: string) => `attribution:${invoiceId}`,
   /** Track which invoices have been processed */
   attributionProcessed: (invoiceId: string) => `attribution:processed:${invoiceId}`,
+  /** Campaign data */
+  campaign: (campaignId: string) => `campaign:${campaignId}`,
+  /** Set of phone numbers in a campaign */
+  campaignContacts: (campaignId: string) => `campaign:${campaignId}:contacts`,
+  /** Set of active campaign IDs */
+  campaignsActive: () => 'campaigns:active',
+  /** Global opt-out list */
+  optOutPhones: () => 'optouts:phones',
 } as const;
 
 // TTLs in seconds
@@ -53,6 +61,7 @@ const TTL = {
   mapping: 604800, // 7 days
   loopPrevention: 60, // 1 minute - just long enough to catch the webhook
   attribution: 31536000, // 1 year - keep attribution records long-term
+  campaign: 7776000, // 90 days - keep campaign data for 3 months
 } as const;
 
 /**
@@ -327,4 +336,185 @@ export async function getAttributionsByDateRange(
   results.sort((a, b) => a.invoiceDate.localeCompare(b.invoiceDate));
 
   return results;
+}
+
+// ============================================
+// CAMPAIGN MANAGER
+// ============================================
+
+export interface CampaignStats {
+  total: number;      // Total contacts in campaign
+  queued: number;     // Messages queued
+  skipped: number;    // Skipped (already contacted)
+  sent: number;       // Successfully sent
+  failed: number;     // Failed to send
+  responses: number;  // Inbound responses
+  optOuts: number;    // Opt-outs detected
+}
+
+export interface Campaign {
+  id: string;
+  name: string;
+  status: 'pending' | 'running' | 'paused' | 'completed';
+  messageTemplate: string;
+  createdAt: string; // ISO timestamp
+  stats: CampaignStats;
+}
+
+/**
+ * Create a new campaign
+ */
+export async function createCampaign(
+  id: string,
+  name: string,
+  messageTemplate: string
+): Promise<Campaign> {
+  const redis = getRedis();
+
+  const campaign: Campaign = {
+    id,
+    name,
+    status: 'pending',
+    messageTemplate,
+    createdAt: new Date().toISOString(),
+    stats: {
+      total: 0,
+      queued: 0,
+      skipped: 0,
+      sent: 0,
+      failed: 0,
+      responses: 0,
+      optOuts: 0,
+    },
+  };
+
+  await redis.set(KEYS.campaign(id), campaign, { ex: TTL.campaign });
+  await redis.sadd(KEYS.campaignsActive(), id);
+
+  logger.info('Created campaign', { id, name });
+  return campaign;
+}
+
+/**
+ * Get campaign by ID
+ */
+export async function getCampaign(id: string): Promise<Campaign | null> {
+  const redis = getRedis();
+  return redis.get<Campaign>(KEYS.campaign(id));
+}
+
+/**
+ * Update campaign status
+ */
+export async function updateCampaignStatus(
+  id: string,
+  status: Campaign['status']
+): Promise<void> {
+  const redis = getRedis();
+  const campaign = await getCampaign(id);
+  if (!campaign) {
+    throw new Error(`Campaign not found: ${id}`);
+  }
+
+  campaign.status = status;
+  await redis.set(KEYS.campaign(id), campaign, { ex: TTL.campaign });
+
+  // Remove from active set if completed
+  if (status === 'completed') {
+    await redis.srem(KEYS.campaignsActive(), id);
+  }
+
+  logger.info('Updated campaign status', { id, status });
+}
+
+/**
+ * Increment campaign stats
+ */
+export async function incrementCampaignStats(
+  id: string,
+  updates: Partial<CampaignStats>
+): Promise<void> {
+  const redis = getRedis();
+  const campaign = await getCampaign(id);
+  if (!campaign) {
+    throw new Error(`Campaign not found: ${id}`);
+  }
+
+  // Apply increments
+  for (const [key, value] of Object.entries(updates)) {
+    if (value !== undefined) {
+      campaign.stats[key as keyof CampaignStats] += value;
+    }
+  }
+
+  await redis.set(KEYS.campaign(id), campaign, { ex: TTL.campaign });
+}
+
+/**
+ * Add a phone to the campaign's contact set
+ */
+export async function addCampaignContact(
+  campaignId: string,
+  phone: string,
+  variant?: string
+): Promise<void> {
+  const redis = getRedis();
+  // Store phone:variant mapping for response tracking
+  const value = variant ? `${phone}:${variant}` : phone;
+  await redis.sadd(KEYS.campaignContacts(campaignId), value);
+}
+
+/**
+ * Check if a phone is part of a campaign
+ */
+export async function isPhoneInCampaign(
+  campaignId: string,
+  phone: string
+): Promise<{ inCampaign: boolean; variant?: string }> {
+  const redis = getRedis();
+  const members = await redis.smembers(KEYS.campaignContacts(campaignId));
+
+  for (const member of members) {
+    if (member.startsWith(phone)) {
+      const parts = member.split(':');
+      return { inCampaign: true, variant: parts[1] };
+    }
+  }
+
+  return { inCampaign: false };
+}
+
+/**
+ * Add phone to global opt-out list
+ */
+export async function addOptOut(phone: string): Promise<void> {
+  const redis = getRedis();
+  await redis.sadd(KEYS.optOutPhones(), phone);
+  logger.info('Added opt-out', { phone });
+}
+
+/**
+ * Check if phone is in opt-out list
+ */
+export async function isOptedOut(phone: string): Promise<boolean> {
+  const redis = getRedis();
+  return (await redis.sismember(KEYS.optOutPhones(), phone)) === 1;
+}
+
+/**
+ * Get all active campaigns
+ */
+export async function getActiveCampaigns(): Promise<Campaign[]> {
+  const redis = getRedis();
+  const ids = await redis.smembers(KEYS.campaignsActive());
+
+  const campaigns: Campaign[] = [];
+  for (const id of ids) {
+    const campaign = await getCampaign(id);
+    if (campaign) {
+      campaigns.push(campaign);
+    }
+  }
+
+  return campaigns;
 }

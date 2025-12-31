@@ -40,6 +40,12 @@ interface EnvConfig {
     url: string;
     token: string;
   };
+  // QStash (for campaign message queuing)
+  qstash: {
+    token: string | null;
+    currentSigningKey: string | null;
+    nextSigningKey: string | null;
+  };
   // Environment
   nodeEnv: 'development' | 'production';
 }
@@ -86,6 +92,11 @@ export function getEnv(): EnvConfig {
     redis: {
       url: requireEnv('UPSTASH_REDIS_REST_URL'),
       token: requireEnv('UPSTASH_REDIS_REST_TOKEN'),
+    },
+    qstash: {
+      token: process.env.QSTASH_TOKEN || null,
+      currentSigningKey: process.env.QSTASH_CURRENT_SIGNING_KEY || null,
+      nextSigningKey: process.env.QSTASH_NEXT_SIGNING_KEY || null,
     },
     nodeEnv: (process.env.NODE_ENV as 'development' | 'production') || 'development',
   };

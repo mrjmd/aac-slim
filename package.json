@@ -15,6 +15,7 @@
     "@upstash/qstash": "^2.8.4",
     "@upstash/redis": "^1.28.0",
     "csv-parse": "^6.1.0",
+    "dotenv": "^17.2.3",
     "libphonenumber-js": "^1.10.54"
   },
   "devDependencies": {

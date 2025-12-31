@@ -12,6 +12,10 @@
  *     --message="Hi {firstName}, I noticed you're a homeowner in {city}..."
  */
 
+// Load .env file
+import { config } from 'dotenv';
+config();
+
 import { parseArgs } from 'node:util';
 import { parsePropertyRadarFile, type NormalizedContact } from '../src/lib/csv-parser.js';
 import { hasExistingConversation } from '../src/clients/quo.js';

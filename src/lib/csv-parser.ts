@@ -136,6 +136,7 @@ export function parsePropertyRadarCSV(csvContent: string): ParseResult {
     columns: true,
     skip_empty_lines: true,
     trim: true,
+    relax_column_count: true, // Handle rows with inconsistent column counts
   }) as PropertyRadarRow[];
 
   stats.totalRows = rows.length;

@@ -9,6 +9,8 @@
     "start": "next start",
     "lint": "eslint src/**/*.ts",
     "test": "vitest",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui",
     "typecheck": "tsc --noEmit",
     "campaign:start": "npx tsx scripts/run-campaign.ts",
     "campaign:stats": "npx tsx -e \"const { getCampaign } = require('./src/lib/redis.js'); getCampaign(process.argv[2]).then(c => console.log(JSON.stringify(c, null, 2)))\""
@@ -24,6 +26,7 @@
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
+    "@playwright/test": "^1.57.0",
     "@tailwindcss/postcss": "^4.1.18",
     "@types/node": "^20.10.0",
     "@types/react": "^19.2.7",

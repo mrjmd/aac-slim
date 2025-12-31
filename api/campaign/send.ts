@@ -10,7 +10,7 @@ import { logger } from '../../src/lib/logger.js';
 import { getEnv } from '../../src/lib/env.js';
 // import { verifyQStashSignature } from '../../src/lib/queue.js';
 import { sendMessage } from '../../src/clients/quo.js';
-import { isOptedOut, incrementCampaignStats, addCampaignContact } from '../../src/lib/redis.js';
+import { isOptedOut, incrementCampaignStats, incrementVariantStats, addCampaignContact } from '../../src/lib/redis.js';
 
 const log = logger.child({ handler: 'campaign-send' });
 
@@ -68,6 +68,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
       // Update stats
       await incrementCampaignStats(payload.campaignId, { sent: 1 });
+
+      // Update variant-specific stats if applicable
+      if (payload.variant) {
+        await incrementVariantStats(payload.campaignId, payload.variant, { sent: 1 });
+      }
 
       log.info('Campaign message sent', {
         campaignId: payload.campaignId,

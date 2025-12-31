@@ -10,6 +10,13 @@
  *     --csv="Export-20250115.csv" \
  *     --name="2025-01-15-Braintree" \
  *     --message="Hi {firstName}, I noticed you're a homeowner in {city}..."
+ *
+ * A/B Testing:
+ *   npx tsx scripts/run-campaign.ts \
+ *     --csv="Export-20250115.csv" \
+ *     --name="2025-01-15-Braintree" \
+ *     --message-a="Hi {firstName}, we're doing work in {city}..." \
+ *     --message-b="Hey {firstName}! Noticed you're in {city}..."
  */
 
 // Load .env file
@@ -20,7 +27,13 @@ import { parseArgs } from 'node:util';
 import { parsePropertyRadarFile, type NormalizedContact } from '../src/lib/csv-parser.js';
 import { hasExistingConversation } from '../src/clients/quo.js';
 import { createCampaignContact } from '../src/clients/pipedrive.js';
-import { createCampaign, incrementCampaignStats, updateCampaignStatus } from '../src/lib/redis.js';
+import {
+  createCampaign,
+  incrementCampaignStats,
+  updateCampaignStatus,
+  selectVariant,
+  type CampaignVariant,
+} from '../src/lib/redis.js';
 import { queueMessage, calculateDelay } from '../src/lib/queue.js';
 import { getEnv } from '../src/lib/env.js';
 
@@ -30,6 +43,8 @@ const { values } = parseArgs({
     csv: { type: 'string', short: 'c' },
     name: { type: 'string', short: 'n' },
     message: { type: 'string', short: 'm' },
+    'message-a': { type: 'string' },
+    'message-b': { type: 'string' },
     'dry-run': { type: 'boolean', default: false },
     'skip-dedup': { type: 'boolean', default: false },
     help: { type: 'boolean', short: 'h' },
@@ -46,16 +61,28 @@ Usage:
 Options:
   --csv, -c       Path to Property Radar CSV export (required)
   --name, -n      Campaign name, e.g., "2025-01-15-Braintree" (required)
-  --message, -m   Message template with {firstName} and {city} placeholders (required)
+  --message, -m   Message template with {firstName} and {city} placeholders
+  --message-a     Variant A message (for A/B testing)
+  --message-b     Variant B message (for A/B testing)
   --dry-run       Process CSV but don't queue messages or create contacts
   --skip-dedup    Skip Quo conversation history check (for testing)
   --help, -h      Show this help
 
-Example:
+Either --message OR both --message-a and --message-b are required.
+
+Examples:
+  # Single message campaign:
   npx tsx scripts/run-campaign.ts \\
     --csv="exports/Export-20250115.csv" \\
     --name="2025-01-15-Braintree" \\
-    --message="Hi {firstName}, I noticed you're a homeowner in {city}. We're doing exterior work in your area. Would you like a free estimate?"
+    --message="Hi {firstName}, I noticed you're a homeowner in {city}..."
+
+  # A/B test campaign (50/50 split):
+  npx tsx scripts/run-campaign.ts \\
+    --csv="exports/Export-20250115.csv" \\
+    --name="2025-01-15-Braintree-AB" \\
+    --message-a="Hi {firstName}, we're doing work in {city}..." \\
+    --message-b="Hey {firstName}! Noticed you're in {city}..."
 `);
 }
 
@@ -65,14 +92,38 @@ if (values.help) {
 }
 
 // Validate required args
-if (!values.csv || !values.name || !values.message) {
-  console.error('Error: --csv, --name, and --message are required\n');
+const hasMessage = !!values.message;
+const hasABTest = !!values['message-a'] && !!values['message-b'];
+
+if (!values.csv || !values.name) {
+  console.error('Error: --csv and --name are required\n');
+  printHelp();
+  process.exit(1);
+}
+
+if (!hasMessage && !hasABTest) {
+  console.error('Error: Either --message OR both --message-a and --message-b are required\n');
+  printHelp();
+  process.exit(1);
+}
+
+if (hasMessage && hasABTest) {
+  console.error('Error: Cannot use --message with --message-a/--message-b. Choose one approach.\n');
   printHelp();
   process.exit(1);
 }
 
 const isDryRun = values['dry-run'];
 const skipDedup = values['skip-dedup'];
+const isABTest = hasABTest;
+
+// Build variants array if A/B testing
+const variants: Array<{ id: string; message: string; weight: number }> | undefined = isABTest
+  ? [
+      { id: 'A', message: values['message-a']!, weight: 50 },
+      { id: 'B', message: values['message-b']!, weight: 50 },
+    ]
+  : undefined;
 
 /**
  * Personalize a message template with contact data
@@ -100,6 +151,9 @@ async function main() {
   console.log(`📱 Sending from: ${env.quo.phoneNumber}`);
   console.log(`📊 Campaign: ${values.name}`);
 
+  if (isABTest) {
+    console.log(`🧪 A/B TEST MODE - 50/50 split between variants A and B`);
+  }
   if (isDryRun) {
     console.log('⚠️  DRY RUN MODE - No messages will be sent\n');
   }
@@ -126,13 +180,17 @@ async function main() {
 
   // Create campaign in Redis
   const campaignId = `campaign-${values.name!.toLowerCase().replace(/[^a-z0-9-]/g, '-')}`;
+  const defaultMessage = values.message || values['message-a']!; // Fallback for display
 
   if (!isDryRun) {
-    await createCampaign(campaignId, values.name!, values.message!);
+    await createCampaign(campaignId, values.name!, defaultMessage, variants);
     await incrementCampaignStats(campaignId, { total: contacts.length });
   }
 
   console.log(`🎯 Campaign ID: ${campaignId}\n`);
+
+  // For A/B test tracking
+  const variantCounts: Record<string, number> = { A: 0, B: 0 };
 
   // Build the callback URL for QStash
   const callbackUrl = `${process.env.VERCEL_URL || 'https://aac-middleware.vercel.app'}/api/campaign/send`;
@@ -185,8 +243,22 @@ async function main() {
       if (created) pipedriveCreated++;
     }
 
+    // Select message (variant if A/B testing, otherwise single message)
+    let messageTemplate: string;
+    let variantId: string | undefined;
+
+    if (isABTest && variants) {
+      // Use weighted random selection for A/B test
+      const selectedVariant = selectVariant(variants as CampaignVariant[]);
+      messageTemplate = selectedVariant.message;
+      variantId = selectedVariant.id;
+      variantCounts[variantId]++;
+    } else {
+      messageTemplate = values.message!;
+    }
+
     // Personalize the message
-    const personalizedMessage = personalizeMessage(values.message!, contact);
+    const personalizedMessage = personalizeMessage(messageTemplate, contact);
 
     // Validate message length
     if (personalizedMessage.length > 160) {
@@ -202,6 +274,7 @@ async function main() {
           pipedrivePersonId,
           phone: contact.phone,
           message: personalizedMessage,
+          variant: variantId,
         },
         delay,
         callbackUrl
@@ -209,7 +282,8 @@ async function main() {
       await incrementCampaignStats(campaignId, { queued: 1 });
     }
 
-    console.log(`${progress} ✅ ${contact.phone} - ${contact.firstName} in ${contact.city}`);
+    const variantLabel = variantId ? ` [${variantId}]` : '';
+    console.log(`${progress} ✅ ${contact.phone} - ${contact.firstName} in ${contact.city}${variantLabel}`);
     queued++;
     queueIndex++;
   }
@@ -228,6 +302,10 @@ async function main() {
   console.log(`   Campaign: ${values.name}`);
   console.log(`   Status: ${isDryRun ? 'DRY RUN' : 'Running'}`);
   console.log(`   Queued: ${formatNumber(queued)}`);
+  if (isABTest) {
+    console.log(`      → Variant A: ${formatNumber(variantCounts.A)}`);
+    console.log(`      → Variant B: ${formatNumber(variantCounts.B)}`);
+  }
   console.log(`   Skipped (already contacted): ${formatNumber(skipped)}`);
   console.log(`   Pipedrive contacts created: ${formatNumber(pipedriveCreated)}`);
   console.log(`   Estimated completion: ~${estimatedMinutes} minutes`);

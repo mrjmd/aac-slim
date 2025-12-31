@@ -352,11 +352,23 @@ export interface CampaignStats {
   optOuts: number;    // Opt-outs detected
 }
 
+export interface CampaignVariant {
+  id: string;         // 'A', 'B', 'C', 'D'
+  message: string;    // The message template for this variant
+  weight: number;     // 0-100, all weights must sum to 100
+  stats: {
+    sent: number;
+    responses: number;
+    optOuts: number;
+  };
+}
+
 export interface Campaign {
   id: string;
   name: string;
   status: 'pending' | 'running' | 'paused' | 'completed';
-  messageTemplate: string;
+  messageTemplate: string;  // Default template (used if no variants)
+  variants?: CampaignVariant[];  // Optional A/B test variants
   createdAt: string; // ISO timestamp
   stats: CampaignStats;
 }
@@ -367,15 +379,23 @@ export interface Campaign {
 export async function createCampaign(
   id: string,
   name: string,
-  messageTemplate: string
+  messageTemplate: string,
+  variants?: Array<{ id: string; message: string; weight: number }>
 ): Promise<Campaign> {
   const redis = getRedis();
+
+  // Initialize variant stats if variants provided
+  const campaignVariants: CampaignVariant[] | undefined = variants?.map(v => ({
+    ...v,
+    stats: { sent: 0, responses: 0, optOuts: 0 },
+  }));
 
   const campaign: Campaign = {
     id,
     name,
     status: 'pending',
     messageTemplate,
+    variants: campaignVariants,
     createdAt: new Date().toISOString(),
     stats: {
       total: 0,
@@ -391,8 +411,55 @@ export async function createCampaign(
   await redis.set(KEYS.campaign(id), campaign, { ex: TTL.campaign });
   await redis.sadd(KEYS.campaignsActive(), id);
 
-  logger.info('Created campaign', { id, name });
+  logger.info('Created campaign', { id, name, variantCount: variants?.length || 0 });
   return campaign;
+}
+
+/**
+ * Select a variant based on weighted random selection
+ */
+export function selectVariant(variants: CampaignVariant[]): CampaignVariant {
+  const totalWeight = variants.reduce((sum, v) => sum + v.weight, 0);
+  let random = Math.random() * totalWeight;
+
+  for (const variant of variants) {
+    random -= variant.weight;
+    if (random <= 0) {
+      return variant;
+    }
+  }
+
+  // Fallback to first variant (shouldn't happen)
+  return variants[0];
+}
+
+/**
+ * Increment variant-specific stats
+ */
+export async function incrementVariantStats(
+  campaignId: string,
+  variantId: string,
+  updates: Partial<CampaignVariant['stats']>
+): Promise<void> {
+  const redis = getRedis();
+  const campaign = await getCampaign(campaignId);
+  if (!campaign || !campaign.variants) {
+    return;
+  }
+
+  const variant = campaign.variants.find(v => v.id === variantId);
+  if (!variant) {
+    return;
+  }
+
+  // Apply increments to variant stats
+  for (const [key, value] of Object.entries(updates)) {
+    if (value !== undefined) {
+      variant.stats[key as keyof CampaignVariant['stats']] += value;
+    }
+  }
+
+  await redis.set(KEYS.campaign(campaignId), campaign, { ex: TTL.campaign });
 }
 
 /**
@@ -517,4 +584,40 @@ export async function getActiveCampaigns(): Promise<Campaign[]> {
   }
 
   return campaigns;
+}
+
+/**
+ * Find which campaign (if any) a phone number belongs to
+ * Searches all active campaigns
+ */
+export async function findCampaignForPhone(
+  phone: string
+): Promise<{ campaign: Campaign; variant?: string } | null> {
+  const campaigns = await getActiveCampaigns();
+
+  for (const campaign of campaigns) {
+    const result = await isPhoneInCampaign(campaign.id, phone);
+    if (result.inCampaign) {
+      return { campaign, variant: result.variant };
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Opt-out keywords (case-insensitive, whole word)
+ */
+export const OPT_OUT_KEYWORDS = ['STOP', 'CANCEL', 'UNSUBSCRIBE', 'QUIT', 'END'];
+
+/**
+ * Check if a message contains an opt-out keyword
+ */
+export function isOptOutMessage(message: string): boolean {
+  const upperMessage = message.toUpperCase().trim();
+  return OPT_OUT_KEYWORDS.some(keyword => {
+    // Match whole word only
+    const regex = new RegExp(`\\b${keyword}\\b`);
+    return regex.test(upperMessage);
+  });
 }

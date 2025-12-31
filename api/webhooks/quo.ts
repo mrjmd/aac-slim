@@ -16,7 +16,16 @@ import crypto from 'crypto';
 import { getEnv } from '../../src/lib/env.js';
 import { logger } from '../../src/lib/logger.js';
 import { normalizePhone } from '../../src/lib/phone.js';
-import { markEventProcessed, getPipedriveIdFromPhone, storePhoneMapping } from '../../src/lib/redis.js';
+import {
+  markEventProcessed,
+  getPipedriveIdFromPhone,
+  storePhoneMapping,
+  findCampaignForPhone,
+  incrementCampaignStats,
+  incrementVariantStats,
+  addOptOut,
+  isOptOutMessage,
+} from '../../src/lib/redis.js';
 import { searchPersonByPhone, createPerson, logActivity, updatePersonIncremental } from '../../src/clients/pipedrive.js';
 import { extractEntities, hasUsefulEntities } from '../../src/clients/gemini.js';
 
@@ -311,6 +320,50 @@ export default async function handler(
       });
 
       log.info('Logged transcript activity', { personId: pipedrivePersonId });
+    }
+
+    // ============================================
+    // CAMPAIGN RESPONSE TRACKING (Module 3)
+    // ============================================
+    if (payload.type === 'message.received') {
+      const messageBody = payload.data.body || '';
+
+      // Check if this phone is part of any active campaign
+      const campaignResult = await findCampaignForPhone(e164Phone);
+
+      if (campaignResult) {
+        const { campaign, variant } = campaignResult;
+
+        log.info('Inbound message from campaign contact', {
+          phone: e164Phone,
+          campaignId: campaign.id,
+          variant,
+        });
+
+        // Check for opt-out first
+        if (isOptOutMessage(messageBody)) {
+          log.info('Opt-out detected', { phone: e164Phone, campaignId: campaign.id });
+
+          // Add to global opt-out list
+          await addOptOut(e164Phone);
+
+          // Update campaign stats
+          await incrementCampaignStats(campaign.id, { optOuts: 1 });
+
+          // Update variant stats if applicable
+          if (variant) {
+            await incrementVariantStats(campaign.id, variant, { optOuts: 1 });
+          }
+        } else {
+          // Track as a response
+          await incrementCampaignStats(campaign.id, { responses: 1 });
+
+          // Update variant stats if applicable
+          if (variant) {
+            await incrementVariantStats(campaign.id, variant, { responses: 1 });
+          }
+        }
+      }
     }
 
     // ============================================

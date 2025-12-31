@@ -1,8 +1,8 @@
 # Module 3: Outbound SMS Campaign Manager
 
-**Version:** 1.0
-**Date:** December 30, 2024
-**Status:** Planning
+**Version:** 1.1
+**Date:** December 31, 2024
+**Status:** Ready for Implementation
 
 ---
 
@@ -74,26 +74,39 @@ This is a numbers game with optimization potential. A/B testing and response tra
          ▼
 ┌─────────────────┐
 │ Create Campaign │
-│ - Name          │
+│ - Name (YYYY-   │
+│   MM-DD-Area)   │
 │ - Message(s)    │
-│ - Schedule      │
 └────────┬────────┘
          │
          ▼
 ┌─────────────────┐
 │  For each row:  │
 │ 1. Parse name   │
-│ 2. Normalize    │◄─── Before sending
-│    phone        │
-│ 3. Create PD    │
+│ 2. Normalize    │
+│    phone (E.164)│
+│ 3. CHECK QUO    │◄─── CRITICAL: Check for existing
+│    for existing │     conversation before anything else
+│    conversation │
+│ 4. Skip if      │
+│    previously   │
+│    contacted    │
+│ 5. Create PD    │
 │    contact      │
-│ 4. Queue SMS    │
+│ 6. Queue SMS    │
+│    via QStash   │
 └────────┬────────┘
-         │ Throttled (2-3 sec intervals)
+         │ QStash delivers with 2-3 sec delays
          ▼
 ┌─────────────────┐
-│   Send SMS      │
-│   via Quo       │
+│ /api/campaign/  │
+│    send         │
+│ (QStash calls)  │
+├─────────────────┤
+│ 1. Verify sig   │
+│ 2. Check optout │
+│ 3. Send via Quo │
+│ 4. Update stats │
 └────────┬────────┘
          │
          ▼
@@ -103,6 +116,37 @@ This is a numbers game with optimization potential. A/B testing and response tra
 │  already built) │
 └─────────────────┘
 ```
+
+### 3.1.1 Quo-Based Deduplication (Critical)
+
+**Why This Matters:** Before this system existed, manual cold outreach was done directly through OpenPhone/Quo. We must check Quo's message history to avoid re-contacting people.
+
+**Implementation:**
+```typescript
+// New functions in src/clients/quo.ts:
+
+// Get our phone number ID (cache after first call)
+async function getPhoneNumberId(): Promise<string> {
+  // GET /phone-numbers → find our QUO_PHONE_NUMBER → return its id
+}
+
+// Check if we've ever messaged this phone number
+async function hasExistingConversation(phone: string): Promise<boolean> {
+  // GET /messages?phoneNumberId=XXX&participants=[phone]&maxResults=1
+  // Return true if totalItems > 0 or data.length > 0
+}
+```
+
+**Deduplication Flow:**
+```
+For each contact in CSV:
+  1. Normalize phone to E.164
+  2. Call hasExistingConversation(phone)
+  3. If true → skip, log "Previously contacted"
+  4. If false → proceed to Pipedrive creation & queue
+```
+
+**API Calls:** ~250/day (125 checks + 125 sends) - within Quo rate limits
 
 ### 3.2 Message Personalization
 
@@ -280,17 +324,17 @@ We're doing work in your area...
 **Campaign (Redis hash):**
 ```json
 {
-  "id": "campaign-2024-12-30",
-  "name": "Winter 2024 Outreach",
-  "status": "running",
-  "variants": [...],
-  "schedule": {
-    "startTime": "2024-12-30T09:00:00",
-    "endTime": "2024-12-30T17:00:00"
-  },
+  "id": "campaign-2025-01-15-braintree",
+  "name": "2025-01-15-Braintree",
+  "status": "pending|running|paused|completed",
+  "messageTemplate": "Hi {firstName}, I noticed you're a homeowner in {city}...",
+  "createdAt": "2025-01-15T09:00:00Z",
   "stats": {
     "total": 125,
+    "queued": 100,
+    "skipped": 25,       // Already contacted via Quo
     "sent": 45,
+    "failed": 2,
     "responses": 3,
     "optOuts": 1
   }
@@ -317,11 +361,13 @@ optouts:phones → ["+13392224624", "+17815551234", ...]
 
 | Component | Purpose |
 |-----------|---------|
+| `src/clients/quo.ts` | **MODIFY**: Add `getPhoneNumberId()`, `hasExistingConversation()` |
 | `src/lib/csv-parser.ts` | Parse Property Radar CSV, normalize data |
 | `src/lib/campaign.ts` | Campaign CRUD, variant assignment, stats |
 | `src/lib/queue.ts` | QStash integration for delayed sending |
 | `api/campaign/send.ts` | Endpoint called by QStash to send SMS |
 | `api/campaign/stats.ts` | Get campaign stats (for CLI/UI) |
+| `api/webhooks/quo.ts` | **MODIFY (Phase 2)**: Add campaign response tracking |
 | `scripts/run-campaign.ts` | CLI to import CSV and start campaign |
 
 ### 4.5 Response Tracking
@@ -352,30 +398,38 @@ if (campaigns.length > 0) {
 
 ### Phase 1: Core Campaign Flow (MVP)
 
-1. **CSV Parsing**
+1. **Quo Deduplication Functions** (First!)
+   - Add `getPhoneNumberId()` to quo.ts
+   - Add `hasExistingConversation(phone)` to quo.ts
+   - Cache phone number ID after first lookup
+
+2. **CSV Parsing**
    - Read Property Radar CSV
-   - Normalize names (title case)
-   - Normalize phones (E.164)
+   - Normalize names: "JON LINKER" → { firstName: "Jon", lastName: "Linker" }
+   - Normalize phones: "339-222-4624" → "+13392224624" (E.164)
    - Validate required fields
+   - Extract secondary contacts as separate rows
 
-2. **Pipedrive Contact Creation**
-   - Create Person with all available data
-   - Add campaign tracking fields
-   - Handle duplicates (skip if phone exists)
-
-3. **Message Queue**
-   - Set up QStash integration
-   - Schedule messages with staggered delays
+3. **QStash Integration**
+   - Add `@upstash/qstash` dependency
+   - Configure env vars (QSTASH_TOKEN, signing keys)
    - Create `/api/campaign/send` endpoint
+   - Implement delay calculation with jitter
 
-4. **Basic Sending**
-   - Single message template (no A/B yet)
-   - Send via Quo API
-   - Log success/failure
+4. **Campaign Data Model**
+   - Redis keys for campaign state
+   - Stats tracking (total, queued, sent, failed, skipped)
 
-5. **CLI Tool**
-   - `npm run campaign:start -- --csv=export.csv --message="Hi {firstName}..."`
-   - Shows progress, handles errors
+5. **Pipedrive Contact Creation**
+   - Check if phone exists in Pipedrive (avoid duplicates)
+   - Create Person with all CSV fields + campaign fields
+   - Store Pipedrive person ID for later reference
+
+6. **CLI Tool**
+   - `npm run campaign:start -- --csv=export.csv --name="2025-01-15-Braintree" --message="Hi {firstName}..."`
+   - Checks Quo for existing conversations before queueing
+   - Shows progress: queued, skipped (already contacted), failed
+   - Handles errors gracefully
 
 ### Phase 2: A/B Testing & Tracking
 
@@ -431,8 +485,9 @@ if (campaigns.length > 0) {
 ### New Environment Variables
 
 ```
-QSTASH_TOKEN=xxx           # Upstash QStash auth
-QSTASH_CURRENT_URL=https://aac-middleware.vercel.app  # For callbacks
+QSTASH_TOKEN=xxx                    # Upstash QStash API token
+QSTASH_CURRENT_SIGNING_KEY=xxx      # For webhook verification
+QSTASH_NEXT_SIGNING_KEY=xxx         # For key rotation
 ```
 
 ### Pipedrive Custom Fields to Add
@@ -472,16 +527,31 @@ QSTASH_CURRENT_URL=https://aac-middleware.vercel.app  # For callbacks
 | Ongoing use | Monthly batch | Daily use |
 | **Overall** | **Simpler** | **More complex** |
 
+### Risk Mitigation
+
+| Risk | Mitigation |
+|------|------------|
+| QStash rate limits | Free tier is 500/day; 125 msgs/day is well within limits |
+| Duplicate sends | **Check Quo API for existing conversations** - catches manual outreach too |
+| Phone format issues | Strict E.164 validation, skip invalid phones |
+| Opt-out compliance | Check blocklist before every send, not just at queue time |
+| Vercel timeout | QStash handles delivery; endpoint just sends single SMS |
+| Quo API rate limits | ~250 calls/day (125 checks + 125 sends) - well within limits |
+
 ---
 
 ## 8. Resolved Questions
 
-| Question | Decision |
-|----------|----------|
-| **Secondary contacts** | Yes, text both primary and secondary mobile numbers |
-| **Duplicate handling** | Check if previously messaged - flag and skip. Critical since opt-outs exist but aren't tracked yet |
-| **Message length** | Keep within single SMS (160 chars) for cost efficiency |
-| **Weekends** | Include weekends - research shows Saturday has highest conversion rates for B2C |
+| Question | Decision | Rationale |
+|----------|----------|-----------|
+| **Architecture** | CLI-first (Option A) | Simpler to build, prove flow first, add UI later if needed |
+| **Queue System** | QStash | Native delay support, free tier sufficient (500/day), no polling needed |
+| **Campaign Naming** | `YYYY-MM-DD-Area` format | Date-based + geographic identifier (e.g., "2025-01-15-Braintree") |
+| **Secondary contacts** | Yes, text both primary and secondary mobile numbers | Treat as separate queue items for tracking |
+| **Duplicate handling** | **Check Quo API for existing conversations** | Critical: catches people contacted manually through OpenPhone before this system existed |
+| **Message length** | Keep within single SMS (160 chars) | Cost efficiency - single segment |
+| **Weekends** | Include weekends | Research shows Saturday has highest conversion rates for B2C |
+| **Timezone** | Eastern Time (America/New_York) | MA business, all Property Radar data is local |
 
 ## 9. SMS Timing Research (2025)
 
@@ -512,23 +582,31 @@ Sources: [Omnisend](https://www.omnisend.com/blog/best-time-to-send-sms/), [Atte
 
 ## 10. Remaining Questions
 
-1. **Campaign naming convention:** Date-based? Area-based? "Winter-2025-Braintree"?
+1. ~~**Campaign naming convention:**~~ → Resolved: `YYYY-MM-DD-Area` format (e.g., "2025-01-15-Braintree")
 
-2. **Existing opt-outs:** Need to import/flag people who've already opted out before building this
+2. **Existing opt-outs:** The Quo deduplication check handles this - if we've messaged them before (and they opted out), we won't message them again since the conversation exists in Quo.
 
 ---
 
 ## 11. Success Criteria
 
-Campaign Manager is "done" when:
+### Phase 1 MVP - Campaign Manager is "done" when:
 
 - [ ] Can import Property Radar CSV via CLI
+- [ ] **Quo conversation history checked before queueing** (critical dedup)
+- [ ] Previously contacted people are skipped with clear logging
 - [ ] Contacts created in Pipedrive before texting
-- [ ] Messages sent throttled (2-3 sec intervals)
+- [ ] Messages queued via QStash with 2-3 sec staggered delays
+- [ ] Campaign stats track sent/failed/skipped counts
+- [ ] Opt-out list checked before sending
+- [ ] 125 messages/day sustainable without issues
+
+### Phase 2 - A/B Testing complete when:
+
 - [ ] A/B variants tracked separately
 - [ ] Response rate visible per variant
 - [ ] Opt-outs detected and honored
-- [ ] 125 messages/day sustainable without issues
+- [ ] Variant assigned and stored on Pipedrive contact
 
 ---
 
@@ -537,23 +615,38 @@ Campaign Manager is "done" when:
 ```bash
 # Import CSV and start campaign immediately
 npm run campaign:start -- \
-  --csv="Export-20250824.csv" \
-  --name="Winter 2024 Braintree" \
+  --csv="Export-20250115.csv" \
+  --name="2025-01-15-Braintree" \
   --message="Hi {firstName}, I noticed you're a homeowner in {city}. We're doing exterior work in your area this winter. Would you like a free estimate?"
 
-# With A/B variants
+# Output:
+# Parsing CSV... 150 contacts found
+# Checking Quo for existing conversations...
+#   - 25 contacts already messaged (skipping)
+#   - 125 new contacts to process
+# Creating Pipedrive contacts...
+# Queueing messages via QStash...
+#
+# Campaign: 2025-01-15-Braintree
+# Status: Running
+# Queued: 125 | Skipped: 25 | Total: 150
+# Estimated completion: 5 minutes
+
+# With A/B variants (Phase 2)
 npm run campaign:start -- \
-  --csv="Export-20250824.csv" \
-  --name="Winter 2024 Test" \
+  --csv="Export-20250115.csv" \
+  --name="2025-01-15-Test" \
   --variant-a="Hi {firstName}, I noticed you're in {city}..." \
   --variant-b="Hey {firstName}! Homeowner in {city}?..."
 
 # Check campaign stats
-npm run campaign:stats -- --name="Winter 2024 Braintree"
+npm run campaign:stats -- --name="2025-01-15-Braintree"
 
 # Output:
-# Campaign: Winter 2024 Braintree
-# Status: Running
+# Campaign: 2025-01-15-Braintree
+# Status: Completed
+#
+# Totals: 125 sent, 2 failed, 25 skipped (previously contacted)
 #
 # Variant A: 62 sent, 4 responses (6.5%), 1 opt-out
 # Variant B: 63 sent, 7 responses (11.1%), 0 opt-outs

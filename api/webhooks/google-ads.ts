@@ -14,7 +14,7 @@ import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { getEnv } from '../../src/lib/env.js';
 import { logger } from '../../src/lib/logger.js';
 import { normalizePhone } from '../../src/lib/phone.js';
-import { markEventProcessed, storePhoneMapping } from '../../src/lib/redis.js';
+import { markEventProcessed, storePhoneMapping, trackWebhookProcessed, logHealthError } from '../../src/lib/redis.js';
 import { searchPersonByPhone, createPerson, createTask, updatePerson } from '../../src/clients/pipedrive.js';
 import { sendMessage } from '../../src/clients/quo.js';
 
@@ -245,6 +245,9 @@ ${city ? `City: ${city}` : ''}`;
     // ============================================
     await sendLeadAlert(name, e164Phone, payload.campaign_id, payload.is_test || false);
 
+    // Track successful processing for health dashboard
+    await trackWebhookProcessed('google-ads');
+
     // ============================================
     // SUCCESS RESPONSE
     // ============================================
@@ -257,6 +260,9 @@ ${city ? `City: ${city}` : ''}`;
 
   } catch (error) {
     log.error('Webhook processing failed', error as Error, { leadId: payload.lead_id });
+
+    // Log error for health dashboard
+    await logHealthError('google-ads', (error as Error).message, payload.lead_id);
 
     // Return 200 to acknowledge receipt (prevent infinite retries)
     res.status(200).json({

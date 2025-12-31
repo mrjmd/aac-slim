@@ -621,3 +621,46 @@ export function isOptOutMessage(message: string): boolean {
     return regex.test(upperMessage);
   });
 }
+
+// ============================================
+// HEALTH MONITORING
+// ============================================
+
+/**
+ * Track a webhook processing event for health monitoring
+ */
+export async function trackWebhookProcessed(
+  source: 'pipedrive' | 'quo' | 'google-ads'
+): Promise<void> {
+  const redis = getRedis();
+  const today = new Date().toISOString().split('T')[0];
+  const now = new Date().toISOString();
+
+  await Promise.all([
+    redis.incr(`webhooks:${source}:${today}:count`),
+    redis.set(`webhooks:${source}:last`, now),
+    // Set TTL of 48 hours on the count key
+    redis.expire(`webhooks:${source}:${today}:count`, 172800),
+  ]);
+}
+
+/**
+ * Log an error to Redis for health dashboard
+ */
+export async function logHealthError(
+  source: string,
+  message: string,
+  details?: string
+): Promise<void> {
+  const redis = getRedis();
+  const error = JSON.stringify({
+    timestamp: new Date().toISOString(),
+    source,
+    message,
+    details,
+  });
+
+  // Push to list, keep only last 100 errors
+  await redis.lpush('health:errors', error);
+  await redis.ltrim('health:errors', 0, 99);
+}

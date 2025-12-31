@@ -10,7 +10,7 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { logger } from '../../src/lib/logger.js';
 import { normalizePhone } from '../../src/lib/phone.js';
-import { markEventProcessed, storeIdMapping, getQuoIdFromPipedrive, storePhoneMapping, getQbCustomerIdFromPipedrive, storePipedriveToQbMapping, storeQbToPipedriveMapping } from '../../src/lib/redis.js';
+import { markEventProcessed, storeIdMapping, getQuoIdFromPipedrive, storePhoneMapping, getQbCustomerIdFromPipedrive, storePipedriveToQbMapping, storeQbToPipedriveMapping, trackWebhookProcessed, logHealthError } from '../../src/lib/redis.js';
 import { searchContactByPhone, createContact, updateContact, parseFullName } from '../../src/clients/quo.js';
 import { getOrganization, getPerson } from '../../src/clients/pipedrive.js';
 import { isQuickBooksConnected, searchCustomerByEmail, searchCustomerByName, createCustomer, getCustomer, updateCustomer } from '../../src/clients/quickbooks.js';
@@ -320,6 +320,9 @@ export default async function handler(
       log.debug('QuickBooks not connected, skipping sync');
     }
 
+    // Track successful processing for health dashboard
+    await trackWebhookProcessed('pipedrive');
+
     res.status(200).json({
       status: 'synced',
       pipedriveId: data.id,
@@ -328,6 +331,9 @@ export default async function handler(
     });
   } catch (error) {
     log.error('Webhook processing failed', error as Error, { eventId });
+
+    // Log error for health dashboard
+    await logHealthError('pipedrive', (error as Error).message, eventId);
 
     // Return 200 to acknowledge receipt (prevent retries that could cause issues)
     // The error is logged for investigation

@@ -25,6 +25,8 @@ import {
   incrementVariantStats,
   addOptOut,
   isOptOutMessage,
+  trackWebhookProcessed,
+  logHealthError,
 } from '../../src/lib/redis.js';
 import { searchPersonByPhone, createPerson, logActivity, updatePersonIncremental } from '../../src/clients/pipedrive.js';
 import { extractEntities, hasUsefulEntities } from '../../src/clients/gemini.js';
@@ -420,6 +422,9 @@ export default async function handler(
       }
     }
 
+    // Track successful processing for health dashboard
+    await trackWebhookProcessed('quo');
+
     res.status(200).json({
       status: 'processed',
       pipedrivePersonId,
@@ -427,6 +432,9 @@ export default async function handler(
     });
   } catch (error) {
     log.error('Webhook processing failed', error as Error, { eventId: payload.id });
+
+    // Log error for health dashboard
+    await logHealthError('quo', (error as Error).message, payload.id);
 
     // Return 200 to acknowledge receipt
     res.status(200).json({

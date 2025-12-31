@@ -808,3 +808,254 @@ Automated testing is "done" when:
 - [ ] Running `npm test` before deploy gives confidence nothing broke
 
 Coverage percentage doesn't matter. If the tests catch regressions, they're doing their job.
+
+---
+
+## Module 3: Campaign Manager Tests
+
+### Unit Tests
+
+```typescript
+// tests/unit/csv-parser.test.ts
+describe('CSV Parser', () => {
+  describe('normalizeName', () => {
+    it('title-cases all-caps names', () => {
+      expect(normalizeName('JON LINKER')).toEqual({
+        firstName: 'Jon',
+        lastName: 'Linker'
+      });
+    });
+
+    it('handles single name', () => {
+      expect(normalizeName('MADONNA')).toEqual({
+        firstName: 'Madonna',
+        lastName: null
+      });
+    });
+
+    it('returns Homeowner for empty name', () => {
+      expect(normalizeName('')).toEqual({
+        firstName: 'Homeowner',
+        lastName: null
+      });
+    });
+  });
+
+  describe('normalizePhone', () => {
+    it('converts 10-digit to E.164', () => {
+      expect(normalizePhone('339-222-4624')).toBe('+13392224624');
+    });
+
+    it('handles various formats', () => {
+      expect(normalizePhone('(339) 222-4624')).toBe('+13392224624');
+      expect(normalizePhone('3392224624')).toBe('+13392224624');
+      expect(normalizePhone('1-339-222-4624')).toBe('+13392224624');
+    });
+
+    it('returns null for invalid numbers', () => {
+      expect(normalizePhone('123')).toBeNull();
+      expect(normalizePhone('invalid')).toBeNull();
+    });
+  });
+
+  describe('parsePropertyRadarCSV', () => {
+    it('parses valid CSV and extracts contacts', () => {
+      const csv = `Primary Name,Primary Mobile Phone1,Primary Mobile 1 Status,City
+JON LINKER,339-222-4624,Active,BRAINTREE`;
+
+      const result = parsePropertyRadarCSV(csv);
+
+      expect(result.contacts).toHaveLength(1);
+      expect(result.contacts[0].firstName).toBe('Jon');
+      expect(result.contacts[0].phone).toBe('+13392224624');
+    });
+
+    it('skips rows with inactive phone status', () => {
+      const csv = `Primary Name,Primary Mobile Phone1,Primary Mobile 1 Status,City
+JON LINKER,339-222-4624,Inactive,BRAINTREE`;
+
+      const result = parsePropertyRadarCSV(csv);
+
+      expect(result.contacts).toHaveLength(0);
+      expect(result.stats.skippedInactivePhone).toBe(1);
+    });
+
+    it('extracts secondary contacts', () => {
+      const csv = `Primary Name,Primary Mobile Phone1,Primary Mobile 1 Status,City,Secondary Name,Secondary Mobile Phone1
+JON LINKER,339-222-4624,Active,BRAINTREE,AIMEE LINKER,781-316-1658`;
+
+      const result = parsePropertyRadarCSV(csv);
+
+      expect(result.contacts).toHaveLength(2);
+      expect(result.stats.primaryContacts).toBe(1);
+      expect(result.stats.secondaryContacts).toBe(1);
+    });
+  });
+});
+```
+
+```typescript
+// tests/unit/campaign.test.ts
+describe('Campaign', () => {
+  describe('selectVariant', () => {
+    it('selects from variants based on weight', () => {
+      const variants = [
+        { id: 'A', message: 'A', weight: 50, stats: { sent: 0, responses: 0, optOuts: 0 } },
+        { id: 'B', message: 'B', weight: 50, stats: { sent: 0, responses: 0, optOuts: 0 } },
+      ];
+
+      // Run many selections
+      const counts = { A: 0, B: 0 };
+      for (let i = 0; i < 1000; i++) {
+        const selected = selectVariant(variants);
+        counts[selected.id]++;
+      }
+
+      // Should be roughly 50/50 (within 10%)
+      expect(counts.A).toBeGreaterThan(400);
+      expect(counts.B).toBeGreaterThan(400);
+    });
+
+    it('respects unequal weights', () => {
+      const variants = [
+        { id: 'A', message: 'A', weight: 90, stats: { sent: 0, responses: 0, optOuts: 0 } },
+        { id: 'B', message: 'B', weight: 10, stats: { sent: 0, responses: 0, optOuts: 0 } },
+      ];
+
+      const counts = { A: 0, B: 0 };
+      for (let i = 0; i < 1000; i++) {
+        const selected = selectVariant(variants);
+        counts[selected.id]++;
+      }
+
+      expect(counts.A).toBeGreaterThan(800);
+      expect(counts.B).toBeLessThan(200);
+    });
+  });
+
+  describe('isOptOutMessage', () => {
+    it('detects STOP keyword', () => {
+      expect(isOptOutMessage('STOP')).toBe(true);
+      expect(isOptOutMessage('stop')).toBe(true);
+      expect(isOptOutMessage('Stop')).toBe(true);
+    });
+
+    it('detects other opt-out keywords', () => {
+      expect(isOptOutMessage('CANCEL')).toBe(true);
+      expect(isOptOutMessage('UNSUBSCRIBE')).toBe(true);
+      expect(isOptOutMessage('QUIT')).toBe(true);
+      expect(isOptOutMessage('END')).toBe(true);
+    });
+
+    it('requires whole word match', () => {
+      expect(isOptOutMessage('I stopped by')).toBe(false);
+      expect(isOptOutMessage('unending')).toBe(false);
+    });
+
+    it('returns false for regular messages', () => {
+      expect(isOptOutMessage('Yes, interested!')).toBe(false);
+      expect(isOptOutMessage('Call me tomorrow')).toBe(false);
+    });
+  });
+});
+```
+
+### Integration Tests
+
+```typescript
+// tests/integration/campaign-send.test.ts
+describe('Campaign Send Endpoint', () => {
+  beforeEach(() => {
+    mockQuo.reset();
+    mockRedis.reset();
+  });
+
+  it('sends message via Quo and updates stats', async () => {
+    mockRedis.isOptedOut.mockResolvedValue(false);
+    mockQuo.sendMessage.mockResolvedValue({ id: 'msg123' });
+
+    const response = await handleCampaignSend({
+      campaignId: 'campaign-test',
+      pipedrivePersonId: 123,
+      phone: '+16175551234',
+      message: 'Test message',
+    });
+
+    expect(response.status).toBe(200);
+    expect(mockQuo.sendMessage).toHaveBeenCalledWith(
+      expect.any(String), // from number
+      '+16175551234',
+      'Test message'
+    );
+    expect(mockRedis.incrementCampaignStats).toHaveBeenCalledWith('campaign-test', { sent: 1 });
+  });
+
+  it('skips opted-out phones', async () => {
+    mockRedis.isOptedOut.mockResolvedValue(true);
+
+    const response = await handleCampaignSend({
+      campaignId: 'campaign-test',
+      pipedrivePersonId: 123,
+      phone: '+16175551234',
+      message: 'Test message',
+    });
+
+    expect(response.body.skipped).toBe(true);
+    expect(mockQuo.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('tracks variant stats when variant provided', async () => {
+    mockRedis.isOptedOut.mockResolvedValue(false);
+    mockQuo.sendMessage.mockResolvedValue({ id: 'msg123' });
+
+    await handleCampaignSend({
+      campaignId: 'campaign-test',
+      pipedrivePersonId: 123,
+      phone: '+16175551234',
+      message: 'Test message',
+      variant: 'A',
+    });
+
+    expect(mockRedis.incrementVariantStats).toHaveBeenCalledWith('campaign-test', 'A', { sent: 1 });
+  });
+});
+```
+
+```typescript
+// tests/integration/campaign-response.test.ts
+describe('Campaign Response Tracking (Quo Webhook)', () => {
+  it('increments response count for campaign contact', async () => {
+    mockRedis.findCampaignForPhone.mockResolvedValue({
+      campaign: { id: 'campaign-test', ... },
+      variant: 'A',
+    });
+    mockRedis.isOptOutMessage.mockReturnValue(false);
+
+    await handleQuoWebhook(inboundMessagePayload);
+
+    expect(mockRedis.incrementCampaignStats).toHaveBeenCalledWith('campaign-test', { responses: 1 });
+    expect(mockRedis.incrementVariantStats).toHaveBeenCalledWith('campaign-test', 'A', { responses: 1 });
+  });
+
+  it('handles opt-out message from campaign contact', async () => {
+    mockRedis.findCampaignForPhone.mockResolvedValue({
+      campaign: { id: 'campaign-test', ... },
+      variant: 'B',
+    });
+    mockRedis.isOptOutMessage.mockReturnValue(true);
+
+    await handleQuoWebhook({ ...inboundMessagePayload, data: { body: 'STOP' } });
+
+    expect(mockRedis.addOptOut).toHaveBeenCalledWith('+16175551234');
+    expect(mockRedis.incrementCampaignStats).toHaveBeenCalledWith('campaign-test', { optOuts: 1 });
+  });
+
+  it('ignores messages from non-campaign contacts', async () => {
+    mockRedis.findCampaignForPhone.mockResolvedValue(null);
+
+    await handleQuoWebhook(inboundMessagePayload);
+
+    expect(mockRedis.incrementCampaignStats).not.toHaveBeenCalled();
+  });
+});
+```

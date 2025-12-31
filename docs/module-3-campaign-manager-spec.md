@@ -1,8 +1,18 @@
 # Module 3: Outbound SMS Campaign Manager
 
-**Version:** 1.1
+**Version:** 2.0
 **Date:** December 31, 2024
-**Status:** Ready for Implementation
+**Status:** Phase 1 & 2 Complete, Phase 3 Pending
+
+---
+
+## Implementation Status
+
+| Phase | Status | Completion Date |
+|-------|--------|-----------------|
+| Phase 1: Core Campaign Flow | Complete | Dec 31, 2024 |
+| Phase 2: A/B Testing & Response Tracking | Complete | Dec 31, 2024 |
+| Phase 3: Scheduling & Time Windows | Not Started | - |
 
 ---
 
@@ -592,21 +602,28 @@ Sources: [Omnisend](https://www.omnisend.com/blog/best-time-to-send-sms/), [Atte
 
 ### Phase 1 MVP - Campaign Manager is "done" when:
 
-- [ ] Can import Property Radar CSV via CLI
-- [ ] **Quo conversation history checked before queueing** (critical dedup)
-- [ ] Previously contacted people are skipped with clear logging
-- [ ] Contacts created in Pipedrive before texting
-- [ ] Messages queued via QStash with 2-3 sec staggered delays
-- [ ] Campaign stats track sent/failed/skipped counts
-- [ ] Opt-out list checked before sending
-- [ ] 125 messages/day sustainable without issues
+- [x] Can import Property Radar CSV via CLI
+- [x] **Quo conversation history checked before queueing** (critical dedup)
+- [x] Previously contacted people are skipped with clear logging
+- [x] Contacts created in Pipedrive before texting
+- [x] Messages queued via QStash with 2-3 sec staggered delays
+- [x] Campaign stats track sent/failed/skipped counts
+- [x] Opt-out list checked before sending
+- [x] 125 messages/day sustainable without issues
 
 ### Phase 2 - A/B Testing complete when:
 
-- [ ] A/B variants tracked separately
-- [ ] Response rate visible per variant
-- [ ] Opt-outs detected and honored
-- [ ] Variant assigned and stored on Pipedrive contact
+- [x] A/B variants tracked separately
+- [x] Response rate visible per variant
+- [x] Opt-outs detected and honored
+- [x] Variant assigned and stored on Pipedrive contact
+
+### Phase 3 - Scheduling complete when:
+
+- [ ] Campaign start time can be scheduled
+- [ ] Sending windows restrict to business hours
+- [ ] Campaign auto-pauses outside window
+- [ ] Send time vs response correlation tracked
 
 ---
 
@@ -652,4 +669,115 @@ npm run campaign:stats -- --name="2025-01-15-Braintree"
 # Variant B: 63 sent, 7 responses (11.1%), 0 opt-outs
 #
 # ✓ Variant B performing 70% better
+```
+
+---
+
+## 13. Implementation Notes
+
+### Actual CLI Usage (Implemented)
+
+```bash
+# Single message campaign
+npx tsx scripts/run-campaign.ts \
+  --csv="Export-20250115.csv" \
+  --name="2025-01-15-Braintree" \
+  --message="Hi {firstName}, I noticed you're a homeowner in {city}..."
+
+# A/B test campaign (50/50 split)
+npx tsx scripts/run-campaign.ts \
+  --csv="Export-20250115.csv" \
+  --name="2025-01-15-AB-Test" \
+  --message-a="Hi {firstName}, we're doing work in {city}..." \
+  --message-b="Hey {firstName}! Noticed you're in {city}..."
+
+# Dry run (no messages sent, no contacts created)
+npx tsx scripts/run-campaign.ts \
+  --csv="Export-20250115.csv" \
+  --name="2025-01-15-Test" \
+  --message="Hi {firstName}..." \
+  --dry-run
+
+# Skip dedup check (for testing with internal numbers)
+npx tsx scripts/run-campaign.ts \
+  --csv="Export-20250115.csv" \
+  --name="2025-01-15-Test" \
+  --message="Hi {firstName}..." \
+  --skip-dedup
+
+# Check campaign stats via API
+curl https://aac-middleware.vercel.app/api/campaign/stats?id=campaign-2025-01-15-braintree
+```
+
+### File Structure (Implemented)
+
+```
+src/
+  lib/
+    csv-parser.ts      # Property Radar CSV parsing & normalization
+    redis.ts           # Campaign data model, variants, opt-out handling
+    queue.ts           # QStash integration for delayed sending
+  clients/
+    quo.ts             # hasExistingConversation() for deduplication
+    pipedrive.ts       # createCampaignContact() for pre-send contact creation
+
+api/
+  campaign/
+    send.ts            # QStash callback - sends SMS, tracks variant stats
+    stats.ts           # Campaign stats with A/B analysis & insights
+  webhooks/
+    quo.ts             # Response tracking, opt-out detection (modified)
+
+scripts/
+  run-campaign.ts      # CLI entry point
+```
+
+### Key Functions
+
+| Function | Location | Purpose |
+|----------|----------|---------|
+| `parsePropertyRadarCSV()` | csv-parser.ts | Parse CSV, normalize names/phones |
+| `hasExistingConversation()` | quo.ts | Check Quo for prior messages |
+| `createCampaignContact()` | pipedrive.ts | Create contact before texting |
+| `createCampaign()` | redis.ts | Create campaign with optional variants |
+| `selectVariant()` | redis.ts | Weighted random variant selection |
+| `queueMessage()` | queue.ts | Queue to QStash with delay |
+| `findCampaignForPhone()` | redis.ts | Find campaign for inbound response |
+| `isOptOutMessage()` | redis.ts | Detect opt-out keywords |
+| `incrementVariantStats()` | redis.ts | Track per-variant metrics |
+
+### Known Limitations
+
+1. **QStash Signature Verification Disabled:** Vercel's body parsing breaks signature verification. Currently relying on QStash's built-in security. TODO: Fix with raw body access.
+
+2. **No Scheduling:** Phase 3 not implemented - campaigns start immediately.
+
+3. **CLI Only:** No web UI for campaign management yet.
+
+### Stats API Response (with A/B Test)
+
+```json
+{
+  "success": true,
+  "campaign": {
+    "id": "campaign-2025-01-15-ab-test",
+    "name": "2025-01-15-AB-Test",
+    "status": "running",
+    "stats": {
+      "total": 100,
+      "queued": 100,
+      "sent": 100,
+      "responses": 11,
+      "optOuts": 1,
+      "responseRate": "11.0%"
+    },
+    "abTest": {
+      "variants": [
+        {"id": "A", "sent": 50, "responses": 4, "optOuts": 1, "responseRate": "8.0%"},
+        {"id": "B", "sent": 50, "responses": 7, "optOuts": 0, "responseRate": "14.0%"}
+      ],
+      "insights": ["Variant B is performing 75% better than A"]
+    }
+  }
+}
 ```

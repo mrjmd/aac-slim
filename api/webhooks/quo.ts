@@ -32,7 +32,7 @@ import { extractEntities, hasUsefulEntities } from '../../src/clients/gemini.js'
 const log = logger.child({ handler: 'quo-webhook' });
 
 // Quo webhook event types we handle
-type QuoEventType = 'call.completed' | 'call.ringing' | 'message.received' | 'message.delivered' | 'transcript.completed';
+type QuoEventType = 'call.completed' | 'call.ringing' | 'message.received' | 'message.delivered' | 'call.transcript.completed';
 
 // Quo webhook payload structure
 interface QuoWebhookPayload {
@@ -101,7 +101,7 @@ function shouldProcessForAI(payload: QuoWebhookPayload): boolean {
   if (payload.type === 'call.completed') return false; // Call without transcript
 
   // For transcripts, check direction
-  if (payload.type === 'transcript.completed') {
+  if (payload.type === 'call.transcript.completed') {
     if (payload.data.direction === 'outgoing') return false;
   }
 
@@ -140,7 +140,7 @@ function extractRemotePhone(payload: QuoWebhookPayload): string | null {
     return participant?.phoneNumber || null;
   }
 
-  if (type === 'transcript.completed') {
+  if (type === 'call.transcript.completed') {
     // Transcripts are associated with calls, use same logic as calls
     if (data.direction === 'incoming') {
       return data.from || null;
@@ -197,7 +197,7 @@ export default async function handler(
   // FILTER EVENTS
   // ============================================
   // Process calls, messages (both directions), and transcripts
-  const allowedEvents: QuoEventType[] = ['call.completed', 'message.received', 'message.delivered', 'transcript.completed'];
+  const allowedEvents: QuoEventType[] = ['call.completed', 'message.received', 'message.delivered', 'call.transcript.completed'];
   if (!allowedEvents.includes(payload.type)) {
     log.debug('Ignoring event type', { type: payload.type });
     res.status(200).json({ status: 'ignored', reason: 'event_type' });
@@ -311,7 +311,7 @@ export default async function handler(
       log.info('Logged SMS activity', { personId: pipedrivePersonId, direction });
     }
 
-    if (payload.type === 'transcript.completed') {
+    if (payload.type === 'call.transcript.completed') {
       const transcript = payload.data.body || '(no transcript)';
 
       await logActivity(pipedrivePersonId, 'call', {

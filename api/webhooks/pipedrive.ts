@@ -13,7 +13,7 @@ import { normalizePhone } from '../../src/lib/phone.js';
 import { markEventProcessed, storeIdMapping, getQuoIdFromPipedrive, storePhoneMapping, getQbCustomerIdFromPipedrive, storePipedriveToQbMapping, storeQbToPipedriveMapping } from '../../src/lib/redis.js';
 import { searchContactByPhone, createContact, updateContact, parseFullName } from '../../src/clients/quo.js';
 import { getOrganization, getPerson } from '../../src/clients/pipedrive.js';
-import { isQuickBooksConnected, searchCustomerByEmail, searchCustomerByName, createCustomer } from '../../src/clients/quickbooks.js';
+import { isQuickBooksConnected, searchCustomerByEmail, searchCustomerByName, createCustomer, getCustomer, updateCustomer } from '../../src/clients/quickbooks.js';
 
 const log = logger.child({ handler: 'pipedrive-webhook' });
 
@@ -222,11 +222,55 @@ export default async function handler(
         // Check if we already have a mapping
         qbCustomerId = await getQbCustomerIdFromPipedrive(String(data.id));
 
-        if (!qbCustomerId) {
-          // Get email for QuickBooks lookup
-          const emails = data.emails as Array<{ value: string; primary: boolean; label: string }> | undefined;
-          const primaryEmail = emails?.find(e => e.primary)?.value || emails?.[0]?.value;
+        // Get email and address for QuickBooks
+        const emails = data.emails as Array<{ value: string; primary: boolean; label: string }> | undefined;
+        const primaryEmail = emails?.find(e => e.primary)?.value || emails?.[0]?.value;
 
+        // Get address from Pipedrive custom field (fetch full person data)
+        const fullPerson = await getPerson(data.id) as Record<string, unknown> | null;
+        const addressField = '5fc7cf5d8c890fe2f7062aaabe1e9b416c851511';
+        const streetNumber = fullPerson?.[`${addressField}_street_number`] as string | undefined;
+        const route = fullPerson?.[`${addressField}_route`] as string | undefined;
+        const locality = fullPerson?.[`${addressField}_locality`] as string | undefined;
+        const state = fullPerson?.[`${addressField}_admin_area_level_1`] as string | undefined;
+        const postalCode = fullPerson?.[`${addressField}_postal_code`] as string | undefined;
+        const addressLine1 = streetNumber && route ? `${streetNumber} ${route}` : (fullPerson?.[addressField] as string | undefined);
+
+        if (qbCustomerId) {
+          // Update existing QuickBooks customer
+          try {
+            const existingCustomer = await getCustomer(qbCustomerId);
+            if (existingCustomer && existingCustomer.Id) {
+              const syncToken = (existingCustomer as unknown as Record<string, unknown>).SyncToken as string;
+
+              await updateCustomer(qbCustomerId, {
+                SyncToken: syncToken,
+                DisplayName: personName,
+                GivenName: firstName,
+                FamilyName: lastName || undefined,
+                CompanyName: company,
+                PrimaryEmailAddr: primaryEmail ? { Address: primaryEmail } : undefined,
+                PrimaryPhone: { FreeFormNumber: e164Phone },
+                BillAddr: addressLine1 ? {
+                  Line1: addressLine1,
+                  City: locality,
+                  CountrySubDivisionCode: state,
+                  PostalCode: postalCode,
+                } : undefined,
+              });
+
+              log.info('Updated QuickBooks customer', {
+                pipedriveId: data.id,
+                qbCustomerId,
+              });
+            }
+          } catch (updateError) {
+            log.error('Failed to update QuickBooks customer', updateError as Error, {
+              pipedriveId: data.id,
+              qbCustomerId,
+            });
+          }
+        } else {
           // Search by email first (most reliable)
           let existingCustomer = primaryEmail
             ? await searchCustomerByEmail(primaryEmail)
@@ -267,11 +311,6 @@ export default async function handler(
               qbCustomerId,
             });
           }
-        } else {
-          log.debug('QuickBooks customer already linked', {
-            pipedriveId: data.id,
-            qbCustomerId,
-          });
         }
       } catch (qbError) {
         // Don't fail the webhook if QuickBooks sync fails

@@ -80,10 +80,10 @@ test.describe('Navigation', () => {
     await expect(page.getByText('QStash Queue')).toBeVisible();
   });
 
-  test('campaigns page shows CLI instructions', async ({ page }) => {
+  test('campaigns page shows new campaign button', async ({ page }) => {
     await page.goto('/campaigns');
 
-    await expect(page.getByText('New Campaign')).toBeVisible();
-    await expect(page.getByText('npm run campaign:start')).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'SMS Campaigns' })).toBeVisible();
+    await expect(page.getByRole('link', { name: 'New Campaign' })).toBeVisible();
   });
 });

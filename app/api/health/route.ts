@@ -1,10 +1,21 @@
 import { NextResponse } from 'next/server'
 import { Redis } from '@upstash/redis'
 
-const redis = new Redis({
-  url: process.env.UPSTASH_REDIS_REST_URL!,
-  token: process.env.UPSTASH_REDIS_REST_TOKEN!,
-})
+// Force dynamic rendering
+export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
+
+// Lazy-load Redis to avoid initialization errors
+function getRedis() {
+  const url = process.env.UPSTASH_REDIS_REST_URL
+  const token = process.env.UPSTASH_REDIS_REST_TOKEN
+
+  if (!url || !token) {
+    console.error('Redis env vars missing:', { hasUrl: !!url, hasToken: !!token })
+    throw new Error('Redis environment variables not configured')
+  }
+  return new Redis({ url, token })
+}
 
 interface HealthMetrics {
   webhooks: {
@@ -37,6 +48,8 @@ interface HealthMetrics {
 
 export async function GET() {
   try {
+    const redis = getRedis()
+
     const metrics: HealthMetrics = {
       webhooks: {
         pipedrive: { processed24h: 0, lastProcessed: null },

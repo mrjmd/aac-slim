@@ -3,15 +3,30 @@ import { parse } from 'csv-parse/sync'
 import { Redis } from '@upstash/redis'
 import { Client } from '@upstash/qstash'
 
-// Initialize clients directly to avoid import issues with .js extensions
-const redis = new Redis({
-  url: process.env.UPSTASH_REDIS_REST_URL!,
-  token: process.env.UPSTASH_REDIS_REST_TOKEN!,
-})
+// Force dynamic rendering
+export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 
-const qstash = new Client({
-  token: process.env.QSTASH_TOKEN!,
-})
+// Lazy-load clients to avoid initialization errors
+function getRedis() {
+  const url = process.env.UPSTASH_REDIS_REST_URL
+  const token = process.env.UPSTASH_REDIS_REST_TOKEN
+
+  if (!url || !token) {
+    console.error('Redis env vars missing:', { hasUrl: !!url, hasToken: !!token })
+    throw new Error('Redis environment variables not configured')
+  }
+  return new Redis({ url, token })
+}
+
+function getQstash() {
+  const token = process.env.QSTASH_TOKEN
+  if (!token) {
+    console.error('QStash token missing')
+    throw new Error('QStash token not configured')
+  }
+  return new Client({ token })
+}
 
 interface CreateCampaignRequest {
   name: string
@@ -139,10 +154,10 @@ function selectVariant(variants: CampaignVariant[]): CampaignVariant {
 }
 
 // ============================================
-// Redis operations
+// Redis operations (pass redis instance to avoid module-level initialization)
 // ============================================
 
-async function createCampaign(id: string, name: string, message: string, variants?: CampaignVariant[]) {
+async function createCampaignRecord(redis: Redis, id: string, name: string, message: string, variants?: CampaignVariant[]) {
   const campaign = {
     id, name, messageTemplate: message, status: 'pending',
     createdAt: new Date().toISOString(),
@@ -154,7 +169,7 @@ async function createCampaign(id: string, name: string, message: string, variant
   await redis.expire(`campaign:${id}`, 90 * 24 * 60 * 60) // 90 days TTL
 }
 
-async function incrementStats(campaignId: string, updates: Record<string, number>) {
+async function incrementStats(redis: Redis, campaignId: string, updates: Record<string, number>) {
   const key = `campaign:${campaignId}`
   const raw = await redis.get(key) as string | null
   if (!raw) return
@@ -165,7 +180,7 @@ async function incrementStats(campaignId: string, updates: Record<string, number
   await redis.set(key, JSON.stringify(campaign))
 }
 
-async function updateStatus(campaignId: string, status: string) {
+async function updateStatus(redis: Redis, campaignId: string, status: string) {
   const key = `campaign:${campaignId}`
   const raw = await redis.get(key) as string | null
   if (!raw) return
@@ -235,6 +250,9 @@ async function createPipedriveContact(contact: NormalizedContact, campaignName: 
 
 export async function POST(request: Request) {
   try {
+    const redis = getRedis()
+    const qstash = getQstash()
+
     const body: CreateCampaignRequest = await request.json()
     const { name, csvData, message, messageA, messageB, dryRun, skipDedup } = body
 
@@ -271,8 +289,8 @@ export async function POST(request: Request) {
     const defaultMessage = message || messageA!
 
     if (!dryRun) {
-      await createCampaign(campaignId, name, defaultMessage, variants)
-      await incrementStats(campaignId, { total: contacts.length })
+      await createCampaignRecord(redis, campaignId, name, defaultMessage, variants)
+      await incrementStats(redis, campaignId, { total: contacts.length })
     }
 
     const callbackUrl = `${process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'https://aac-middleware.vercel.app'}/api/campaign/send`
@@ -293,7 +311,7 @@ export async function POST(request: Request) {
         const hasConversation = await hasExistingConversation(contact.phone)
         if (hasConversation) {
           results.skipped++
-          await incrementStats(campaignId, { skipped: 1 })
+          await incrementStats(redis, campaignId, { skipped: 1 })
           continue
         }
       }
@@ -345,14 +363,14 @@ export async function POST(request: Request) {
           variant: variantId,
         },
       })
-      await incrementStats(campaignId, { queued: 1 })
+      await incrementStats(redis, campaignId, { queued: 1 })
 
       results.queued++
       queueIndex++
     }
 
     if (!dryRun) {
-      await updateStatus(campaignId, 'running')
+      await updateStatus(redis, campaignId, 'running')
     }
 
     return NextResponse.json({

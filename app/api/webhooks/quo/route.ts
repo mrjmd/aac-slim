@@ -1,5 +1,5 @@
 /**
- * Quo (OpenPhone) Webhook Handler
+ * Quo (OpenPhone) Webhook Handler (App Router)
  *
  * Triggers: call.completed, message.received
  * Actions:
@@ -11,11 +11,11 @@
  * uses loop prevention (system user ID) to avoid infinite loops.
  */
 
-import type { VercelRequest, VercelResponse } from '@vercel/node';
-import crypto from 'crypto';
-import { getEnv } from '../../src/lib/env.js';
-import { logger } from '../../src/lib/logger.js';
-import { normalizePhone } from '../../src/lib/phone.js';
+import { NextResponse } from 'next/server'
+import crypto from 'crypto'
+import { getEnv } from '@/lib/env'
+import { logger } from '@/lib/logger'
+import { normalizePhone } from '@/lib/phone'
 import {
   markEventProcessed,
   getPipedriveIdFromPhone,
@@ -28,41 +28,44 @@ import {
   markRecipientResponded,
   trackWebhookProcessed,
   logHealthError,
-} from '../../src/lib/redis.js';
-import { searchPersonByPhone, createPerson, logActivity, updatePersonIncremental } from '../../src/clients/pipedrive.js';
-import { extractEntities, hasUsefulEntities } from '../../src/clients/gemini.js';
+} from '@/lib/redis'
+import { searchPersonByPhone, createPerson, logActivity, updatePersonIncremental } from '@/clients/pipedrive'
+import { extractEntities, hasUsefulEntities } from '@/clients/gemini'
 
-const log = logger.child({ handler: 'quo-webhook' });
+export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
+
+const log = logger.child({ handler: 'quo-webhook' })
 
 // Quo webhook event types we handle
-type QuoEventType = 'call.completed' | 'call.ringing' | 'message.received' | 'message.delivered' | 'call.transcript.completed';
+type QuoEventType = 'call.completed' | 'call.ringing' | 'message.received' | 'message.delivered' | 'call.transcript.completed'
 
 // Quo webhook payload structure
 interface QuoWebhookPayload {
-  id: string; // Event ID for deduplication
-  type: QuoEventType;
-  createdAt: string;
+  id: string // Event ID for deduplication
+  type: QuoEventType
+  createdAt: string
   data: {
     // For calls
-    object?: 'call';
-    id?: string;
-    direction?: 'incoming' | 'outgoing';
-    from?: string; // E.164 phone
-    to?: string; // E.164 phone
-    status?: 'completed' | 'missed' | 'voicemail';
-    duration?: number; // seconds
-    recordingUrl?: string;
-    voicemailUrl?: string;
+    object?: 'call'
+    id?: string
+    direction?: 'incoming' | 'outgoing'
+    from?: string // E.164 phone
+    to?: string // E.164 phone
+    status?: 'completed' | 'missed' | 'voicemail'
+    duration?: number // seconds
+    recordingUrl?: string
+    voicemailUrl?: string
 
     // For messages
-    conversationId?: string;
-    phoneNumber?: string; // Our number
-    body?: string;
+    conversationId?: string
+    phoneNumber?: string // Our number
+    body?: string
     participants?: Array<{
-      phoneNumber: string;
-      name?: string;
-    }>;
-  };
+      phoneNumber: string
+      name?: string
+    }>
+  }
 }
 
 /**
@@ -74,25 +77,25 @@ function verifySignature(
   signature: string | undefined,
   secret: string
 ): boolean {
-  if (!signature) return false;
+  if (!signature) return false
 
   const expected = crypto
     .createHmac('sha256', secret)
     .update(payload)
-    .digest('hex');
+    .digest('hex')
 
   try {
     return crypto.timingSafeEqual(
       Buffer.from(signature),
       Buffer.from(expected)
-    );
+    )
   } catch {
-    return false;
+    return false
   }
 }
 
 // Minimum message length for AI processing (skip trivial messages)
-const MIN_MESSAGE_LENGTH = 10;
+const MIN_MESSAGE_LENGTH = 10
 
 /**
  * Check if a message should be processed by AI for entity extraction
@@ -100,21 +103,21 @@ const MIN_MESSAGE_LENGTH = 10;
  */
 function shouldProcessForAI(payload: QuoWebhookPayload): boolean {
   // Only process inbound messages and transcripts
-  if (payload.type === 'message.delivered') return false; // Outbound SMS
-  if (payload.type === 'call.completed') return false; // Call without transcript
+  if (payload.type === 'message.delivered') return false // Outbound SMS
+  if (payload.type === 'call.completed') return false // Call without transcript
 
   // For transcripts, check direction
   if (payload.type === 'call.transcript.completed') {
-    if (payload.data.direction === 'outgoing') return false;
+    if (payload.data.direction === 'outgoing') return false
   }
 
   // Get the text content
-  const text = payload.data.body || '';
+  const text = payload.data.body || ''
 
   // Skip trivial messages
-  if (text.length < MIN_MESSAGE_LENGTH) return false;
+  if (text.length < MIN_MESSAGE_LENGTH) return false
 
-  return true;
+  return true
 }
 
 /**
@@ -123,250 +126,242 @@ function shouldProcessForAI(payload: QuoWebhookPayload): boolean {
  * For outgoing: it's the "to" number
  */
 function extractRemotePhone(payload: QuoWebhookPayload): string | null {
-  const { type, data } = payload;
+  const { type, data } = payload
 
   if (type === 'call.completed' || type === 'call.ringing') {
     // For calls, use from/to based on direction
     if (data.direction === 'incoming') {
-      return data.from || null;
+      return data.from || null
     } else {
-      return data.to || null;
+      return data.to || null
     }
   }
 
   if (type === 'message.received' || type === 'message.delivered') {
     // For messages, find the participant that isn't our number
-    const ourNumber = data.phoneNumber;
+    const ourNumber = data.phoneNumber
     const participant = data.participants?.find(
       (p) => p.phoneNumber !== ourNumber
-    );
-    return participant?.phoneNumber || null;
+    )
+    return participant?.phoneNumber || null
   }
 
   if (type === 'call.transcript.completed') {
     // Transcripts are associated with calls, use same logic as calls
     if (data.direction === 'incoming') {
-      return data.from || null;
+      return data.from || null
     } else {
-      return data.to || null;
+      return data.to || null
     }
   }
 
-  return null;
+  return null
 }
 
 /**
  * Main webhook handler
  */
-export default async function handler(
-  req: VercelRequest,
-  res: VercelResponse
-): Promise<void> {
-  // Only accept POST
-  if (req.method !== 'POST') {
-    res.status(405).json({ error: 'Method not allowed' });
-    return;
-  }
-
-  const env = getEnv();
+export async function POST(request: Request) {
+  const env = getEnv()
 
   // ============================================
   // SIGNATURE VERIFICATION
   // ============================================
-  const signature = req.headers['openphone-signature'] as string | undefined;
-  const rawBody = JSON.stringify(req.body);
+  // Get raw body for signature verification
+  const rawBody = await request.text()
+  const signature = request.headers.get('openphone-signature') || undefined
 
   if (!verifySignature(rawBody, signature, env.quo.webhookSecret)) {
-    log.warn('Invalid webhook signature');
-    res.status(401).json({ error: 'Invalid signature' });
-    return;
+    log.warn('Invalid webhook signature')
+    return NextResponse.json({ error: 'Invalid signature' }, { status: 401 })
   }
 
-  const payload = req.body as QuoWebhookPayload;
+  let payload: QuoWebhookPayload
+  try {
+    payload = JSON.parse(rawBody)
+  } catch {
+    log.warn('Invalid JSON payload')
+    return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 })
+  }
 
   // Basic validation
   if (!payload?.id || !payload?.type) {
-    log.warn('Invalid payload', { hasBody: !!req.body });
-    res.status(400).json({ error: 'Invalid payload' });
-    return;
+    log.warn('Invalid payload', { hasBody: !!payload })
+    return NextResponse.json({ error: 'Invalid payload' }, { status: 400 })
   }
 
   log.info('Received Quo webhook', {
     eventId: payload.id,
     type: payload.type,
-  });
+  })
 
   // ============================================
   // FILTER EVENTS
   // ============================================
   // Process calls, messages (both directions), and transcripts
-  const allowedEvents: QuoEventType[] = ['call.completed', 'message.received', 'message.delivered', 'call.transcript.completed'];
+  const allowedEvents: QuoEventType[] = ['call.completed', 'message.received', 'message.delivered', 'call.transcript.completed']
   if (!allowedEvents.includes(payload.type)) {
-    log.debug('Ignoring event type', { type: payload.type });
-    res.status(200).json({ status: 'ignored', reason: 'event_type' });
-    return;
+    log.debug('Ignoring event type', { type: payload.type })
+    return NextResponse.json({ status: 'ignored', reason: 'event_type' })
   }
 
   try {
     // ============================================
     // DEDUPLICATION
     // ============================================
-    const isNew = await markEventProcessed('quo', payload.id);
+    const isNew = await markEventProcessed('quo', payload.id)
     if (!isNew) {
-      log.info('Duplicate event ignored', { eventId: payload.id });
-      res.status(200).json({ status: 'ignored', reason: 'duplicate' });
-      return;
+      log.info('Duplicate event ignored', { eventId: payload.id })
+      return NextResponse.json({ status: 'ignored', reason: 'duplicate' })
     }
 
     // ============================================
     // EXTRACT & VALIDATE PHONE
     // ============================================
-    const rawPhone = extractRemotePhone(payload);
+    const rawPhone = extractRemotePhone(payload)
     if (!rawPhone) {
-      log.warn('Could not extract remote phone', { eventId: payload.id });
-      res.status(200).json({ status: 'skipped', reason: 'no_phone' });
-      return;
+      log.warn('Could not extract remote phone', { eventId: payload.id })
+      return NextResponse.json({ status: 'skipped', reason: 'no_phone' })
     }
 
-    const e164Phone = normalizePhone(rawPhone);
+    const e164Phone = normalizePhone(rawPhone)
     if (!e164Phone) {
-      log.warn('Invalid phone number', { rawPhone });
-      res.status(200).json({ status: 'skipped', reason: 'invalid_phone' });
-      return;
+      log.warn('Invalid phone number', { rawPhone })
+      return NextResponse.json({ status: 'skipped', reason: 'invalid_phone' })
     }
 
     // ============================================
     // FIND OR CREATE PIPEDRIVE PERSON
     // ============================================
-    let pipedrivePersonId: number | null = null;
+    let pipedrivePersonId: number | null = null
 
     // Check cache first
-    const cachedId = await getPipedriveIdFromPhone(e164Phone);
+    const cachedId = await getPipedriveIdFromPhone(e164Phone)
     if (cachedId) {
-      pipedrivePersonId = parseInt(cachedId, 10);
-      log.debug('Found person ID in cache', { phone: e164Phone, personId: pipedrivePersonId });
+      pipedrivePersonId = parseInt(cachedId, 10)
+      log.debug('Found person ID in cache', { phone: e164Phone, personId: pipedrivePersonId })
     }
 
     // If not cached, search Pipedrive
     if (!pipedrivePersonId) {
-      const existingPerson = await searchPersonByPhone(e164Phone);
+      const existingPerson = await searchPersonByPhone(e164Phone)
 
       if (existingPerson) {
-        pipedrivePersonId = existingPerson.id;
-        await storePhoneMapping(e164Phone, String(pipedrivePersonId));
-        log.info('Found existing Pipedrive person', { phone: e164Phone, personId: pipedrivePersonId });
+        pipedrivePersonId = existingPerson.id
+        await storePhoneMapping(e164Phone, String(pipedrivePersonId))
+        log.info('Found existing Pipedrive person', { phone: e164Phone, personId: pipedrivePersonId })
       }
     }
 
     // If still not found, create "Unknown Lead"
     if (!pipedrivePersonId) {
-      log.info('Creating Unknown Lead', { phone: e164Phone });
+      log.info('Creating Unknown Lead', { phone: e164Phone })
 
       const newPerson = await createPerson(
         `Unknown Lead ${e164Phone}`,
         e164Phone
-      );
+      )
 
-      pipedrivePersonId = newPerson.id;
-      await storePhoneMapping(e164Phone, String(pipedrivePersonId));
+      pipedrivePersonId = newPerson.id
+      await storePhoneMapping(e164Phone, String(pipedrivePersonId))
 
-      log.info('Created Unknown Lead', { phone: e164Phone, personId: pipedrivePersonId });
+      log.info('Created Unknown Lead', { phone: e164Phone, personId: pipedrivePersonId })
     }
 
     // ============================================
     // LOG ACTIVITY
     // ============================================
     if (payload.type === 'call.completed') {
-      const direction = payload.data.direction === 'incoming' ? 'Inbound' : 'Outbound';
-      const duration = payload.data.duration || 0;
-      const status = payload.data.status || 'completed';
+      const direction = payload.data.direction === 'incoming' ? 'Inbound' : 'Outbound'
+      const duration = payload.data.duration || 0
+      const status = payload.data.status || 'completed'
 
-      let note = `${direction} call - ${status}`;
+      let note = `${direction} call - ${status}`
       if (payload.data.recordingUrl) {
-        note += `\n\nRecording: ${payload.data.recordingUrl}`;
+        note += `\n\nRecording: ${payload.data.recordingUrl}`
       }
       if (payload.data.voicemailUrl) {
-        note += `\n\nVoicemail: ${payload.data.voicemailUrl}`;
+        note += `\n\nVoicemail: ${payload.data.voicemailUrl}`
       }
 
       await logActivity(pipedrivePersonId, 'call', {
         subject: `${direction} Call (${Math.round(duration / 60)}m ${duration % 60}s)`,
         note,
         duration,
-      });
+      })
 
-      log.info('Logged call activity', { personId: pipedrivePersonId, duration });
+      log.info('Logged call activity', { personId: pipedrivePersonId, duration })
     }
 
     if (payload.type === 'message.received' || payload.type === 'message.delivered') {
-      const messageBody = payload.data.body || '(no content)';
+      const messageBody = payload.data.body || '(no content)'
       const truncatedBody = messageBody.length > 100
         ? messageBody.substring(0, 100) + '...'
-        : messageBody;
+        : messageBody
 
-      const direction = payload.type === 'message.received' ? 'Received' : 'Sent';
+      const direction = payload.type === 'message.received' ? 'Received' : 'Sent'
 
       await logActivity(pipedrivePersonId, 'sms', {
         subject: `SMS ${direction}: "${truncatedBody}"`,
         note: `Full message:\n\n${messageBody}`,
-      });
+      })
 
-      log.info('Logged SMS activity', { personId: pipedrivePersonId, direction });
+      log.info('Logged SMS activity', { personId: pipedrivePersonId, direction })
     }
 
     if (payload.type === 'call.transcript.completed') {
-      const transcript = payload.data.body || '(no transcript)';
+      const transcript = payload.data.body || '(no transcript)'
 
       await logActivity(pipedrivePersonId, 'call', {
         subject: 'Call Transcript Available',
         note: `Transcript:\n\n${transcript}`,
-      });
+      })
 
-      log.info('Logged transcript activity', { personId: pipedrivePersonId });
+      log.info('Logged transcript activity', { personId: pipedrivePersonId })
     }
 
     // ============================================
     // CAMPAIGN RESPONSE TRACKING (Module 3)
     // ============================================
     if (payload.type === 'message.received') {
-      const messageBody = payload.data.body || '';
+      const messageBody = payload.data.body || ''
 
       // Check if this phone is part of any active campaign
-      const campaignResult = await findCampaignForPhone(e164Phone);
+      const campaignResult = await findCampaignForPhone(e164Phone)
 
       if (campaignResult) {
-        const { campaign, variant } = campaignResult;
+        const { campaign, variant } = campaignResult
 
         log.info('Inbound message from campaign contact', {
           phone: e164Phone,
           campaignId: campaign.id,
           variant,
-        });
+        })
 
         // Mark recipient as responded (prevents follow-up messages)
-        await markRecipientResponded(e164Phone);
+        await markRecipientResponded(e164Phone)
 
         // Check for opt-out first
         if (isOptOutMessage(messageBody)) {
-          log.info('Opt-out detected', { phone: e164Phone, campaignId: campaign.id });
+          log.info('Opt-out detected', { phone: e164Phone, campaignId: campaign.id })
 
           // Add to global opt-out list
-          await addOptOut(e164Phone);
+          await addOptOut(e164Phone)
 
           // Update campaign stats
-          await incrementCampaignStats(campaign.id, { optOuts: 1 });
+          await incrementCampaignStats(campaign.id, { optOuts: 1 })
 
           // Update variant stats if applicable
           if (variant) {
-            await incrementVariantStats(campaign.id, variant, { optOuts: 1 });
+            await incrementVariantStats(campaign.id, variant, { optOuts: 1 })
           }
         } else {
           // Track as a response
-          await incrementCampaignStats(campaign.id, { responses: 1 });
+          await incrementCampaignStats(campaign.id, { responses: 1 })
 
           // Update variant stats if applicable
           if (variant) {
-            await incrementVariantStats(campaign.id, variant, { responses: 1 });
+            await incrementVariantStats(campaign.id, variant, { responses: 1 })
           }
         }
       }
@@ -376,27 +371,27 @@ export default async function handler(
     // AI ENTITY EXTRACTION (Module 1.3)
     // ============================================
     if (shouldProcessForAI(payload)) {
-      const textContent = payload.data.body || '';
+      const textContent = payload.data.body || ''
       log.info('Processing for AI entity extraction', {
         personId: pipedrivePersonId,
         type: payload.type,
         textLength: textContent.length,
-      });
+      })
 
       try {
-        const entities = await extractEntities(textContent);
+        const entities = await extractEntities(textContent)
 
         if (hasUsefulEntities(entities)) {
           // Build name from extracted entities
-          let extractedName: string | undefined;
+          let extractedName: string | undefined
           if (entities!.fullName) {
-            extractedName = entities!.fullName;
+            extractedName = entities!.fullName
           } else if (entities!.firstName && entities!.lastName) {
-            extractedName = `${entities!.firstName} ${entities!.lastName}`;
+            extractedName = `${entities!.firstName} ${entities!.lastName}`
           } else if (entities!.firstName) {
-            extractedName = entities!.firstName;
+            extractedName = entities!.firstName
           } else if (entities!.lastName) {
-            extractedName = entities!.lastName;
+            extractedName = entities!.lastName
           }
 
           // Incrementally update Pipedrive (only add new fields)
@@ -408,42 +403,42 @@ export default async function handler(
             city: entities!.city || undefined,
             state: entities!.state || undefined,
             zipCode: entities!.zipCode || undefined,
-          });
+          })
 
           if (updateResult.updated) {
             log.info('AI extracted and updated contact', {
               personId: pipedrivePersonId,
               fields: updateResult.fields,
               confidence: entities!.confidence,
-            });
+            })
           }
         }
       } catch (error) {
         // Don't fail the webhook if AI extraction fails
         log.error('AI entity extraction failed', error as Error, {
           personId: pipedrivePersonId,
-        });
+        })
       }
     }
 
     // Track successful processing for health dashboard
-    await trackWebhookProcessed('quo');
+    await trackWebhookProcessed('quo')
 
-    res.status(200).json({
+    return NextResponse.json({
       status: 'processed',
       pipedrivePersonId,
       eventType: payload.type,
-    });
+    })
   } catch (error) {
-    log.error('Webhook processing failed', error as Error, { eventId: payload.id });
+    log.error('Webhook processing failed', error as Error, { eventId: payload.id })
 
     // Log error for health dashboard
-    await logHealthError('quo', (error as Error).message, payload.id);
+    await logHealthError('quo', (error as Error).message, payload.id)
 
     // Return 200 to acknowledge receipt
-    res.status(200).json({
+    return NextResponse.json({
       status: 'error',
       message: 'Processing failed, logged for investigation',
-    });
+    })
   }
 }

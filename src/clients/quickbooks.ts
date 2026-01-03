@@ -3,9 +3,9 @@
  * Handles OAuth token refresh and customer CRUD operations
  */
 
-import { getEnv } from '../lib/env.js';
-import { logger } from '../lib/logger.js';
-import { getQBTokens, storeQBTokens, type QBOAuthTokens } from '../lib/redis.js';
+import { getEnv } from '@/lib/env';
+import { logger } from '@/lib/logger';
+import { getQBTokens, storeQBTokens, type QBOAuthTokens } from '@/lib/redis';
 
 const log = logger.child({ client: 'quickbooks' });
 

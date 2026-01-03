@@ -3,8 +3,8 @@
  * Handles person CRUD and activity logging
  */
 
-import { getEnv } from '../lib/env.js';
-import { logger } from '../lib/logger.js';
+import { getEnv } from '@/lib/env';
+import { logger } from '@/lib/logger';
 
 const log = logger.child({ client: 'pipedrive' });
 

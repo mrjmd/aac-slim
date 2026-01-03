@@ -4,7 +4,7 @@
  */
 
 import { parse } from 'csv-parse/sync';
-import { logger } from './logger.js';
+import { logger } from '@/lib/logger';
 
 const log = logger.child({ lib: 'csv-parser' });
 

@@ -3,7 +3,7 @@
  * Creates HTML tables and SMS summaries from attribution data
  */
 
-import { type AttributionResult } from './redis.js';
+import { type AttributionResult } from '@/lib/redis';
 
 interface ReportData {
   startDate: string;

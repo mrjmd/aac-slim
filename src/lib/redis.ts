@@ -4,8 +4,8 @@
  */
 
 import { Redis } from '@upstash/redis';
-import { getEnv } from './env.js';
-import { logger } from './logger.js';
+import { getEnv } from '@/lib/env';
+import { logger } from '@/lib/logger';
 
 let redisClient: Redis | null = null;
 

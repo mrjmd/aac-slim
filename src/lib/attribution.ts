@@ -3,19 +3,19 @@
  * Traces referral chains and calculates sales commissions
  */
 
-import { logger } from './logger.js';
+import { logger } from '@/lib/logger';
 import {
   getPipedriveIdFromQb,
   storeAttribution,
   wasInvoiceAttributed,
   type AttributionResult,
-} from './redis.js';
+} from '@/lib/redis';
 import {
   getPerson,
   getPersonReferredBy,
   getPipedriveUser,
-} from '../clients/pipedrive.js';
-import { getPaidInvoices, type QBInvoice } from '../clients/quickbooks.js';
+} from '@/clients/pipedrive';
+import { getPaidInvoices, type QBInvoice } from '@/clients/quickbooks';
 
 const log = logger.child({ module: 'attribution' });
 

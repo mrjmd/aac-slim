@@ -4,8 +4,8 @@
  */
 
 import { Client } from '@upstash/qstash';
-import { getEnv } from './env.js';
-import { logger } from './logger.js';
+import { getEnv } from '@/lib/env';
+import { logger } from '@/lib/logger';
 
 const log = logger.child({ lib: 'queue' });
 

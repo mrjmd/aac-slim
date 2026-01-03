@@ -46,6 +46,11 @@ interface EnvConfig {
     currentSigningKey: string | null;
     nextSigningKey: string | null;
   };
+  // SearchBug (phone validation/scrubbing)
+  searchbug: {
+    coCode: string | null;
+    apiKey: string | null;
+  };
   // Environment
   nodeEnv: 'development' | 'production';
 }
@@ -97,6 +102,10 @@ export function getEnv(): EnvConfig {
       token: process.env.QSTASH_TOKEN || null,
       currentSigningKey: process.env.QSTASH_CURRENT_SIGNING_KEY || null,
       nextSigningKey: process.env.QSTASH_NEXT_SIGNING_KEY || null,
+    },
+    searchbug: {
+      coCode: process.env.SEARCHBUG_CO_CODE || null,
+      apiKey: process.env.SEARCHBUG_API_KEY || null,
     },
     nodeEnv: (process.env.NODE_ENV as 'development' | 'production') || 'development',
   };

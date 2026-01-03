@@ -37,6 +37,21 @@ interface CampaignVariant {
   }
 }
 
+interface MultiDayConfig {
+  dailyLimit: number
+  skipWeekends: boolean
+  startHour: number
+  totalContacts: number
+  currentDay: number
+  nextBatchAt?: string
+}
+
+interface FollowUpConfig {
+  delayDays: number
+  message: string
+  sent?: number
+}
+
 interface Campaign {
   id: string
   name: string
@@ -45,10 +60,52 @@ interface Campaign {
   variants?: CampaignVariant[]
   createdAt: string
   stats: CampaignStats
+  multiDay?: MultiDayConfig
+  followUp?: FollowUpConfig
 }
 
 function calcResponseRate(responses: number, sent: number): string {
   return sent > 0 ? ((responses / sent) * 100).toFixed(1) : '0.0'
+}
+
+/**
+ * Derive the correct status for a campaign
+ * Fixes historical campaigns stuck on 'running'
+ */
+function deriveStatus(campaign: Campaign): Campaign['status'] {
+  // Don't change paused or pending
+  if (campaign.status === 'paused' || campaign.status === 'pending') {
+    return campaign.status
+  }
+
+  // Already completed
+  if (campaign.status === 'completed') {
+    return 'completed'
+  }
+
+  // For 'running' campaigns, check if they should be completed
+  const { sent, failed, skipped, queued } = campaign.stats
+  const processed = sent + failed + skipped
+
+  // Multi-day campaigns: check if all batches are done
+  if (campaign.multiDay) {
+    // If there's a next batch scheduled, still running
+    if (campaign.multiDay.nextBatchAt) {
+      return 'running'
+    }
+    // If total contacts are processed, completed
+    if (processed >= campaign.multiDay.totalContacts) {
+      return 'completed'
+    }
+    return 'running'
+  }
+
+  // Single-day campaigns: completed when all queued messages are processed
+  if (queued > 0 && processed >= queued) {
+    return 'completed'
+  }
+
+  return campaign.status
 }
 
 function analyzeVariants(variants: CampaignVariant[]) {
@@ -115,6 +172,8 @@ export async function GET(request: Request) {
         status: string
         createdAt: string
         hasVariants: boolean
+        hasFollowUp: boolean
+        isMultiDay: boolean
         stats: CampaignStats
       }> = []
 
@@ -125,9 +184,11 @@ export async function GET(request: Request) {
           campaigns.push({
             id: campaign.id,
             name: campaign.name,
-            status: campaign.status,
+            status: deriveStatus(campaign),
             createdAt: campaign.createdAt,
             hasVariants: !!campaign.variants,
+            hasFollowUp: !!campaign.followUp,
+            isMultiDay: !!campaign.multiDay,
             stats: campaign.stats,
           })
         }
@@ -150,7 +211,7 @@ export async function GET(request: Request) {
       campaign: {
         id: campaign.id,
         name: campaign.name,
-        status: campaign.status,
+        status: deriveStatus(campaign),
         createdAt: campaign.createdAt,
         messageTemplate: campaign.messageTemplate,
         stats: {
@@ -160,11 +221,33 @@ export async function GET(request: Request) {
       },
     }
 
+    // Include A/B test info
     if (campaign.variants && campaign.variants.length > 0) {
       const analysis = analyzeVariants(campaign.variants)
       ;(response.campaign as Record<string, unknown>).abTest = {
         variants: analysis.variants,
         insights: analysis.insights,
+      }
+    }
+
+    // Include follow-up info
+    if (campaign.followUp) {
+      ;(response.campaign as Record<string, unknown>).followUp = {
+        delayDays: campaign.followUp.delayDays,
+        message: campaign.followUp.message,
+        sent: campaign.followUp.sent || 0,
+      }
+    }
+
+    // Include multi-day info
+    if (campaign.multiDay) {
+      ;(response.campaign as Record<string, unknown>).multiDay = {
+        dailyLimit: campaign.multiDay.dailyLimit,
+        skipWeekends: campaign.multiDay.skipWeekends,
+        startHour: campaign.multiDay.startHour,
+        totalContacts: campaign.multiDay.totalContacts,
+        currentDay: campaign.multiDay.currentDay,
+        nextBatchAt: campaign.multiDay.nextBatchAt,
       }
     }
 

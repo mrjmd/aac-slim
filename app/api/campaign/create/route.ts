@@ -36,6 +36,11 @@ interface CreateCampaignRequest {
   messageB?: string
   dryRun?: boolean
   skipDedup?: boolean
+  scheduledAt?: string // ISO timestamp for scheduled campaigns
+  followUp?: {
+    delayDays: number
+    message: string
+  }
 }
 
 interface NormalizedContact {
@@ -157,16 +162,71 @@ function selectVariant(variants: CampaignVariant[]): CampaignVariant {
 // Redis operations (pass redis instance to avoid module-level initialization)
 // ============================================
 
-async function createCampaignRecord(redis: Redis, id: string, name: string, message: string, variants?: CampaignVariant[]) {
+interface FollowUpConfig {
+  delayDays: number
+  message: string
+}
+
+interface MultiDayConfig {
+  dailyLimit: number
+  skipWeekends: boolean
+  startHour: number
+  totalContacts: number
+  currentDay: number
+  nextBatchAt?: string // ISO timestamp for next batch
+}
+
+async function createCampaignRecord(
+  redis: Redis,
+  id: string,
+  name: string,
+  message: string,
+  variants?: CampaignVariant[],
+  followUp?: FollowUpConfig,
+  multiDay?: MultiDayConfig
+) {
   const campaign = {
     id, name, messageTemplate: message, status: 'pending',
     createdAt: new Date().toISOString(),
     stats: { total: 0, queued: 0, sent: 0, failed: 0, skipped: 0, responses: 0, optOuts: 0 },
     variants,
+    followUp: followUp ? {
+      ...followUp,
+      sent: 0, // Track how many follow-ups sent
+    } : undefined,
+    multiDay, // Multi-day batching config
   }
   await redis.set(`campaign:${id}`, JSON.stringify(campaign))
   await redis.sadd('campaigns:active', id)
   await redis.expire(`campaign:${id}`, 90 * 24 * 60 * 60) // 90 days TTL
+}
+
+// Store pending contacts for multi-day campaigns
+async function storePendingContacts(
+  redis: Redis,
+  campaignId: string,
+  contacts: NormalizedContact[]
+) {
+  const key = `campaign:${campaignId}:pending`
+  // Store as JSON array
+  await redis.set(key, JSON.stringify(contacts))
+  await redis.expire(key, 90 * 24 * 60 * 60) // 90 days TTL
+}
+
+// Calculate next batch time (tomorrow at start hour, skipping weekends if configured)
+function calculateNextBatchTime(startHour: number, skipWeekends: boolean): Date {
+  const next = new Date()
+  next.setDate(next.getDate() + 1) // Tomorrow
+  next.setHours(startHour, 0, 0, 0)
+
+  if (skipWeekends) {
+    // Skip Saturday (6) and Sunday (0)
+    while (next.getDay() === 0 || next.getDay() === 6) {
+      next.setDate(next.getDate() + 1)
+    }
+  }
+
+  return next
 }
 
 async function incrementStats(redis: Redis, campaignId: string, updates: Record<string, number>) {
@@ -187,6 +247,30 @@ async function updateStatus(redis: Redis, campaignId: string, status: string) {
   const campaign = JSON.parse(raw)
   campaign.status = status
   await redis.set(key, JSON.stringify(campaign))
+}
+
+// Track recipient for follow-up processing
+async function trackRecipient(
+  redis: Redis,
+  campaignId: string,
+  phone: string,
+  contact: NormalizedContact,
+  variant?: string
+) {
+  const recipient = {
+    phone,
+    firstName: contact.firstName,
+    lastName: contact.lastName,
+    city: contact.city,
+    subdivision: contact.subdivision,
+    sentAt: new Date().toISOString(),
+    responded: false,
+    variant,
+  }
+  // Store in a hash for easy lookup and updates
+  await redis.hset(`campaign:${campaignId}:recipients`, { [phone]: JSON.stringify(recipient) })
+  // Set TTL on first recipient (90 days)
+  await redis.expire(`campaign:${campaignId}:recipients`, 90 * 24 * 60 * 60)
 }
 
 // ============================================
@@ -253,8 +337,27 @@ export async function POST(request: Request) {
     const redis = getRedis()
     const qstash = getQstash()
 
+    // Fetch global settings
+    const settingsData = await redis.get('settings:global')
+    const settings = settingsData
+      ? typeof settingsData === 'string' ? JSON.parse(settingsData) : settingsData
+      : { campaign: { optOutFooter: 'Reply STOP to opt out', throttleSeconds: 45, dailySendLimit: 125, skipWeekends: true, defaultStartHour: 9 } }
+    const optOutFooter = settings.campaign?.optOutFooter || ''
+    const throttleSeconds = settings.campaign?.throttleSeconds || 45
+    const dailySendLimit = settings.campaign?.dailySendLimit || 125
+    const skipWeekends = settings.campaign?.skipWeekends ?? true
+    const defaultStartHour = settings.campaign?.defaultStartHour ?? 9
+
     const body: CreateCampaignRequest = await request.json()
-    const { name, csvData, message, messageA, messageB, dryRun, skipDedup } = body
+    const { name, csvData, message, messageA, messageB, dryRun, skipDedup, scheduledAt, followUp } = body
+
+    // Calculate base delay for scheduled campaigns
+    let baseDelay = 0
+    if (scheduledAt && !dryRun) {
+      const scheduledTime = new Date(scheduledAt).getTime()
+      const now = Date.now()
+      baseDelay = Math.max(0, Math.floor((scheduledTime - now) / 1000))
+    }
 
     if (!name || !csvData) {
       return NextResponse.json({ error: 'name and csvData are required' }, { status: 400 })
@@ -285,25 +388,61 @@ export async function POST(request: Request) {
         ]
       : undefined
 
-    const campaignId = `campaign-${name.toLowerCase().replace(/[^a-z0-9-]/g, '-')}`
+    const campaignId = `campaign-${name.toLowerCase().replace(/[^a-z0-9-]/g, '-')}-${Date.now()}`
     const defaultMessage = message || messageA!
 
+    // Determine if this is a multi-day campaign
+    const isMultiDay = contacts.length > dailySendLimit
+    const totalDays = isMultiDay ? Math.ceil(contacts.length / dailySendLimit) : 1
+
+    // For multi-day campaigns, only process the first batch
+    const batchContacts = isMultiDay ? contacts.slice(0, dailySendLimit) : contacts
+    const remainingContacts = isMultiDay ? contacts.slice(dailySendLimit) : []
+
+    // Calculate next batch time if multi-day
+    let nextBatchTime: Date | undefined
+    if (isMultiDay && !dryRun) {
+      nextBatchTime = calculateNextBatchTime(defaultStartHour, skipWeekends)
+    }
+
     if (!dryRun) {
-      await createCampaignRecord(redis, campaignId, name, defaultMessage, variants)
+      const multiDayConfig: MultiDayConfig | undefined = isMultiDay ? {
+        dailyLimit: dailySendLimit,
+        skipWeekends,
+        startHour: defaultStartHour,
+        totalContacts: contacts.length,
+        currentDay: 1,
+        nextBatchAt: nextBatchTime?.toISOString(),
+      } : undefined
+
+      await createCampaignRecord(redis, campaignId, name, defaultMessage, variants, followUp, multiDayConfig)
       await incrementStats(redis, campaignId, { total: contacts.length })
+
+      // Store remaining contacts for later batches
+      if (remainingContacts.length > 0) {
+        await storePendingContacts(redis, campaignId, remainingContacts)
+      }
     }
 
     const callbackUrl = `${process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'https://aac-middleware.vercel.app'}/api/campaign/send`
+    const batchCallbackUrl = `${process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'https://aac-middleware.vercel.app'}/api/campaign/process-batch`
 
     const results = {
       campaignId, parseStats, processed: 0, queued: 0, skipped: 0, pipedriveCreated: 0,
       variantCounts: { A: 0, B: 0 } as Record<string, number>,
       preview: [] as Array<{ phone: string; name: string; city: string; message: string; variant?: string }>,
+      isMultiDay,
+      totalDays,
+      dailyLimit: dailySendLimit,
+      batchSize: batchContacts.length,
+      remainingContacts: remainingContacts.length,
+      nextBatchAt: nextBatchTime?.toISOString(),
     }
 
     let queueIndex = 0
 
-    for (const contact of contacts) {
+    // Process only the current batch (first day's contacts)
+    for (const contact of batchContacts) {
       results.processed++
 
       // Dedup check
@@ -329,7 +468,12 @@ export async function POST(request: Request) {
         messageTemplate = message!
       }
 
-      const personalizedMessage = personalizeMessage(messageTemplate, contact)
+      let personalizedMessage = personalizeMessage(messageTemplate, contact)
+
+      // Append opt-out footer if configured
+      if (optOutFooter) {
+        personalizedMessage = `${personalizedMessage}\n\n${optOutFooter}`
+      }
 
       // Dry run: collect preview
       if (dryRun) {
@@ -350,8 +494,9 @@ export async function POST(request: Request) {
       const { id: personId, created } = await createPipedriveContact(contact, name)
       if (created) results.pipedriveCreated++
 
-      // Queue message via QStash
-      const delay = Math.floor(queueIndex * 2.5) // 2.5s between messages
+      // Queue message via QStash with configurable throttle
+      // Add base delay for scheduled campaigns
+      const delay = baseDelay + Math.floor(queueIndex * throttleSeconds)
       await qstash.publishJSON({
         url: callbackUrl,
         delay,
@@ -365,19 +510,42 @@ export async function POST(request: Request) {
       })
       await incrementStats(redis, campaignId, { queued: 1 })
 
+      // Track recipient for follow-up processing
+      if (followUp) {
+        await trackRecipient(redis, campaignId, contact.phone, contact, variantId)
+      }
+
       results.queued++
       queueIndex++
     }
 
     if (!dryRun) {
       await updateStatus(redis, campaignId, 'running')
+
+      // Schedule next batch if multi-day campaign
+      if (isMultiDay && remainingContacts.length > 0 && nextBatchTime) {
+        const delaySeconds = Math.max(0, Math.floor((nextBatchTime.getTime() - Date.now()) / 1000))
+        await qstash.publishJSON({
+          url: batchCallbackUrl,
+          delay: delaySeconds,
+          body: {
+            campaignId,
+            optOutFooter,
+            throttleSeconds,
+            skipDedup,
+          },
+        })
+      }
     }
 
     return NextResponse.json({
       success: true,
       dryRun: !!dryRun,
       ...results,
-      estimatedMinutes: Math.ceil((results.queued * 2.5) / 60),
+      throttleSeconds,
+      scheduledAt: scheduledAt || null,
+      estimatedMinutes: Math.ceil((results.queued * throttleSeconds) / 60),
+      estimatedTotalDays: isMultiDay ? totalDays : 1,
     })
   } catch (error) {
     console.error('Campaign create error:', error)

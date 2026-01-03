@@ -51,8 +51,12 @@ const KEYS = {
   campaignContacts: (campaignId: string) => `campaign:${campaignId}:contacts`,
   /** Set of active campaign IDs */
   campaignsActive: () => 'campaigns:active',
-  /** Global opt-out list */
+  /** Global opt-out list (people who replied STOP) */
   optOutPhones: () => 'optouts:phones',
+  /** DNC list from scrubbing (Federal/State DNC registry) */
+  dncPhones: () => 'suppression:dnc',
+  /** Litigator list from scrubbing (TCPA litigators) */
+  litigatorPhones: () => 'suppression:litigators',
 } as const;
 
 // TTLs in seconds
@@ -363,6 +367,21 @@ export interface CampaignVariant {
   };
 }
 
+export interface FollowUpConfig {
+  delayDays: number;
+  message: string;
+  sent?: number;  // Track how many follow-ups sent
+}
+
+export interface MultiDayConfig {
+  dailyLimit: number;
+  skipWeekends: boolean;
+  startHour: number;
+  totalContacts: number;
+  currentDay: number;
+  nextBatchAt?: string;
+}
+
 export interface Campaign {
   id: string;
   name: string;
@@ -371,6 +390,8 @@ export interface Campaign {
   variants?: CampaignVariant[];  // Optional A/B test variants
   createdAt: string; // ISO timestamp
   stats: CampaignStats;
+  followUp?: FollowUpConfig;  // Follow-up message config
+  multiDay?: MultiDayConfig;  // Multi-day campaign config
 }
 
 /**
@@ -496,6 +517,7 @@ export async function updateCampaignStatus(
 
 /**
  * Increment campaign stats
+ * Auto-completes single-day campaigns when all messages are processed
  */
 export async function incrementCampaignStats(
   id: string,
@@ -511,6 +533,17 @@ export async function incrementCampaignStats(
   for (const [key, value] of Object.entries(updates)) {
     if (value !== undefined) {
       campaign.stats[key as keyof CampaignStats] += value;
+    }
+  }
+
+  // Auto-complete single-day campaigns when all messages are processed
+  // Multi-day campaigns are completed by the batch processor instead
+  if (!campaign.multiDay && campaign.status === 'running') {
+    const { sent, failed, skipped, queued } = campaign.stats;
+    const processed = sent + failed + skipped;
+    if (queued > 0 && processed >= queued) {
+      campaign.status = 'completed';
+      logger.info('Auto-completed single-day campaign', { id, processed, queued });
     }
   }
 
@@ -620,6 +653,176 @@ export function isOptOutMessage(message: string): boolean {
     const regex = new RegExp(`\\b${keyword}\\b`);
     return regex.test(upperMessage);
   });
+}
+
+// ============================================
+// PHONE SUPPRESSION (DNC + LITIGATORS)
+// ============================================
+
+/**
+ * Add a phone to the DNC suppression list
+ * These are phones found on Federal/State DNC registries during scrubbing
+ */
+export async function addToDncList(phone: string): Promise<void> {
+  const redis = getRedis();
+  await redis.sadd(KEYS.dncPhones(), phone);
+}
+
+/**
+ * Add multiple phones to the DNC list
+ */
+export async function addManyToDncList(phones: string[]): Promise<void> {
+  if (phones.length === 0) return;
+  const redis = getRedis();
+  // Add phones in batches to avoid spread operator issues
+  for (const phone of phones) {
+    await redis.sadd(KEYS.dncPhones(), phone);
+  }
+  logger.info('Added phones to DNC list', { count: phones.length });
+}
+
+/**
+ * Check if phone is on DNC list
+ */
+export async function isOnDncList(phone: string): Promise<boolean> {
+  const redis = getRedis();
+  return (await redis.sismember(KEYS.dncPhones(), phone)) === 1;
+}
+
+/**
+ * Add a phone to the litigator suppression list
+ * These are known TCPA litigators - high risk, never contact
+ */
+export async function addToLitigatorList(phone: string): Promise<void> {
+  const redis = getRedis();
+  await redis.sadd(KEYS.litigatorPhones(), phone);
+}
+
+/**
+ * Add multiple phones to the litigator list
+ */
+export async function addManyToLitigatorList(phones: string[]): Promise<void> {
+  if (phones.length === 0) return;
+  const redis = getRedis();
+  // Add phones in batches to avoid spread operator issues
+  for (const phone of phones) {
+    await redis.sadd(KEYS.litigatorPhones(), phone);
+  }
+  logger.info('Added phones to litigator list', { count: phones.length });
+}
+
+/**
+ * Check if phone is a known litigator
+ */
+export async function isLitigator(phone: string): Promise<boolean> {
+  const redis = getRedis();
+  return (await redis.sismember(KEYS.litigatorPhones(), phone)) === 1;
+}
+
+/**
+ * Check if a phone is suppressed (opt-out, DNC, or litigator)
+ * Returns the reason if suppressed, null if clean
+ */
+export async function checkSuppression(phone: string): Promise<'optout' | 'dnc' | 'litigator' | null> {
+  const redis = getRedis();
+
+  // Check in parallel for efficiency
+  const [isOptOut, isDnc, isLit] = await Promise.all([
+    redis.sismember(KEYS.optOutPhones(), phone),
+    redis.sismember(KEYS.dncPhones(), phone),
+    redis.sismember(KEYS.litigatorPhones(), phone),
+  ]);
+
+  if (isLit === 1) return 'litigator';
+  if (isDnc === 1) return 'dnc';
+  if (isOptOut === 1) return 'optout';
+
+  return null;
+}
+
+/**
+ * Filter a list of phones, removing any that are suppressed
+ * Returns clean phones and counts of what was removed
+ */
+export async function filterSuppressedPhones(phones: string[]): Promise<{
+  clean: string[];
+  removed: { optout: number; dnc: number; litigator: number };
+}> {
+  const clean: string[] = [];
+  const removed = { optout: 0, dnc: 0, litigator: 0 };
+
+  for (const phone of phones) {
+    const reason = await checkSuppression(phone);
+    if (reason) {
+      removed[reason]++;
+    } else {
+      clean.push(phone);
+    }
+  }
+
+  return { clean, removed };
+}
+
+/**
+ * Get suppression list stats
+ */
+export async function getSuppressionStats(): Promise<{
+  optouts: number;
+  dnc: number;
+  litigators: number;
+  everMessaged: number;
+}> {
+  const redis = getRedis();
+  const [optouts, dnc, litigators, everMessaged] = await Promise.all([
+    redis.scard(KEYS.optOutPhones()),
+    redis.scard(KEYS.dncPhones()),
+    redis.scard(KEYS.litigatorPhones()),
+    redis.scard('suppression:ever-messaged'),
+  ]);
+  return { optouts, dnc, litigators, everMessaged };
+}
+
+/**
+ * Add a phone to the "ever messaged" list
+ * Should be called after successfully sending a campaign message
+ */
+export async function addToEverMessaged(phone: string): Promise<void> {
+  const redis = getRedis();
+  await redis.sadd('suppression:ever-messaged', phone);
+}
+
+/**
+ * Check if a phone has ever been messaged
+ */
+export async function wasEverMessaged(phone: string): Promise<boolean> {
+  const redis = getRedis();
+  return (await redis.sismember('suppression:ever-messaged', phone)) === 1;
+}
+
+// ============================================
+// FOLLOW-UP TRACKING
+// ============================================
+
+/**
+ * Mark a recipient as having responded (prevents follow-up)
+ * Checks all active campaigns for this phone number
+ */
+export async function markRecipientResponded(phone: string): Promise<void> {
+  const redis = getRedis();
+  const campaignIds = await redis.smembers(KEYS.campaignsActive());
+
+  for (const campaignId of campaignIds) {
+    const recipientKey = `campaign:${campaignId}:recipients`;
+    const recipientData = await redis.hget(recipientKey, phone) as string | null;
+
+    if (recipientData) {
+      const recipient = JSON.parse(recipientData);
+      recipient.responded = true;
+      recipient.respondedAt = new Date().toISOString();
+      await redis.hset(recipientKey, { [phone]: JSON.stringify(recipient) });
+      logger.info('Marked recipient as responded', { phone, campaignId });
+    }
+  }
 }
 
 // ============================================

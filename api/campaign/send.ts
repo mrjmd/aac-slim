@@ -10,7 +10,7 @@ import { logger } from '../../src/lib/logger.js';
 import { getEnv } from '../../src/lib/env.js';
 // import { verifyQStashSignature } from '../../src/lib/queue.js';
 import { sendMessage } from '../../src/clients/quo.js';
-import { isOptedOut, incrementCampaignStats, incrementVariantStats, addCampaignContact } from '../../src/lib/redis.js';
+import { isOptedOut, incrementCampaignStats, incrementVariantStats, addCampaignContact, addToEverMessaged } from '../../src/lib/redis.js';
 
 const log = logger.child({ handler: 'campaign-send' });
 
@@ -65,6 +65,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
       // Track this contact in the campaign
       await addCampaignContact(payload.campaignId, payload.phone, payload.variant);
+
+      // Add to global "ever messaged" list for future duplicate prevention
+      await addToEverMessaged(payload.phone);
 
       // Update stats
       await incrementCampaignStats(payload.campaignId, { sent: 1 });

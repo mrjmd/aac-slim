@@ -24,6 +24,21 @@ interface VariantStats {
   responseRate: string
 }
 
+interface MultiDayConfig {
+  dailyLimit: number
+  skipWeekends: boolean
+  startHour: number
+  totalContacts: number
+  currentDay: number
+  nextBatchAt?: string
+}
+
+interface FollowUpConfig {
+  delayDays: number
+  message: string
+  sent: number
+}
+
 interface Campaign {
   id: string
   name: string
@@ -35,6 +50,8 @@ interface Campaign {
     variants: VariantStats[]
     insights: string[]
   }
+  multiDay?: MultiDayConfig
+  followUp?: FollowUpConfig
 }
 
 export default function CampaignDetailPage() {
@@ -177,6 +194,130 @@ export default function CampaignDetailPage() {
           {campaign.messageTemplate}
         </div>
       </div>
+
+      {/* Multi-Day Campaign Progress */}
+      {campaign.multiDay && (() => {
+        const totalDays = Math.ceil(campaign.multiDay.totalContacts / campaign.multiDay.dailyLimit)
+        const daysRemaining = Math.max(0, Math.ceil((campaign.multiDay.totalContacts - campaign.stats.sent - campaign.stats.skipped - campaign.stats.failed) / campaign.multiDay.dailyLimit))
+        const dayProgress = Math.round((campaign.multiDay.currentDay / totalDays) * 100)
+
+        return (
+          <div className="bg-white rounded-lg shadow p-6 mb-6">
+            <div className="flex justify-between items-center mb-4">
+              <h2 className="text-lg font-semibold text-gray-900">Multi-Day Campaign</h2>
+              <span className="text-2xl font-bold text-indigo-600">
+                Day {campaign.multiDay.currentDay} of {totalDays}
+              </span>
+            </div>
+
+            {/* Day Progress Bar */}
+            <div className="mb-4">
+              <div className="flex justify-between text-sm text-gray-600 mb-1">
+                <span>Campaign Progress</span>
+                <span>{campaign.multiDay.currentDay} / {totalDays} days</span>
+              </div>
+              <div className="w-full bg-gray-200 rounded-full h-2">
+                <div
+                  className="bg-indigo-500 h-2 rounded-full transition-all duration-500"
+                  style={{ width: `${dayProgress}%` }}
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+              <div>
+                <p className="text-sm text-gray-500">Daily Limit</p>
+                <p className="text-xl font-semibold text-gray-900">
+                  {campaign.multiDay.dailyLimit} / day
+                </p>
+              </div>
+              <div>
+                <p className="text-sm text-gray-500">Total Contacts</p>
+                <p className="text-xl font-semibold text-gray-900">
+                  {campaign.multiDay.totalContacts.toLocaleString()}
+                </p>
+              </div>
+              <div>
+                <p className="text-sm text-gray-500">Days Remaining</p>
+                <p className="text-xl font-semibold text-gray-900">
+                  {daysRemaining}
+                </p>
+              </div>
+              <div>
+                <p className="text-sm text-gray-500">Start Time</p>
+                <p className="text-xl font-semibold text-gray-900">
+                  {campaign.multiDay.startHour}:00
+                </p>
+              </div>
+            </div>
+
+            {campaign.multiDay.nextBatchAt && (
+              <div className="bg-blue-50 rounded-lg p-4">
+                <p className="text-sm text-blue-800">
+                  <span className="font-medium">Next batch scheduled:</span>{' '}
+                  {formatDate(campaign.multiDay.nextBatchAt)}
+                </p>
+                {campaign.multiDay.skipWeekends && (
+                  <p className="text-xs text-blue-600 mt-1">
+                    Weekends are skipped
+                  </p>
+                )}
+              </div>
+            )}
+
+            {!campaign.multiDay.nextBatchAt && campaign.status === 'running' && (
+              <div className="bg-yellow-50 rounded-lg p-4">
+                <p className="text-sm text-yellow-800">
+                  Final batch in progress - campaign will complete when all messages are sent
+                </p>
+              </div>
+            )}
+
+            {campaign.status === 'completed' && (
+              <div className="bg-green-50 rounded-lg p-4">
+                <p className="text-sm text-green-800">
+                  Campaign completed after {campaign.multiDay.currentDay} days
+                </p>
+              </div>
+            )}
+          </div>
+        )
+      })()}
+
+      {/* Follow-Up Message */}
+      {campaign.followUp && (
+        <div className="bg-white rounded-lg shadow p-6 mb-6">
+          <h2 className="text-lg font-semibold text-gray-900 mb-4">Follow-Up Message</h2>
+
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-4 mb-4">
+            <div>
+              <p className="text-sm text-gray-500">Delay</p>
+              <p className="text-xl font-semibold text-gray-900">
+                {campaign.followUp.delayDays} day{campaign.followUp.delayDays !== 1 ? 's' : ''}
+              </p>
+            </div>
+            <div>
+              <p className="text-sm text-gray-500">Non-Responders</p>
+              <p className="text-xl font-semibold text-gray-900">
+                {(campaign.stats.sent - campaign.stats.responses).toLocaleString()}
+              </p>
+            </div>
+            <div>
+              <p className="text-sm text-gray-500">Follow-Ups Sent</p>
+              <p className="text-xl font-semibold text-amber-600">
+                {campaign.followUp.sent.toLocaleString()}
+              </p>
+            </div>
+          </div>
+
+          <div className="bg-amber-50 rounded-lg p-4">
+            <p className="text-xs font-medium text-amber-700 mb-2">Follow-Up Message:</p>
+            <p className="text-sm text-amber-900 whitespace-pre-wrap">
+              {campaign.followUp.message}
+            </p>
+          </div>
+        </div>
+      )}
 
       {/* A/B Test Results */}
       {campaign.abTest && (

@@ -25,6 +25,7 @@ import {
   incrementVariantStats,
   addOptOut,
   isOptOutMessage,
+  markRecipientResponded,
   trackWebhookProcessed,
   logHealthError,
 } from '../../src/lib/redis.js';
@@ -341,6 +342,9 @@ export default async function handler(
           campaignId: campaign.id,
           variant,
         });
+
+        // Mark recipient as responded (prevents follow-up messages)
+        await markRecipientResponded(e164Phone);
 
         // Check for opt-out first
         if (isOptOutMessage(messageBody)) {

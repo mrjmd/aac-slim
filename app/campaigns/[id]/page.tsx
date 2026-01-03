@@ -88,6 +88,33 @@ export default function CampaignDetailPage() {
     }
   }
 
+  async function pauseCampaign() {
+    if (!confirm('Pause this campaign? Messages in queue will be skipped.')) return
+    try {
+      const res = await fetch(`/api/campaign/pause?id=${id}`, { method: 'POST' })
+      if (!res.ok) {
+        const data = await res.json()
+        throw new Error(data.error || 'Failed to pause campaign')
+      }
+      fetchCampaign()
+    } catch (err) {
+      alert((err as Error).message)
+    }
+  }
+
+  async function resumeCampaign() {
+    try {
+      const res = await fetch(`/api/campaign/pause?id=${id}`, { method: 'DELETE' })
+      if (!res.ok) {
+        const data = await res.json()
+        throw new Error(data.error || 'Failed to resume campaign')
+      }
+      fetchCampaign()
+    } catch (err) {
+      alert((err as Error).message)
+    }
+  }
+
   function formatDate(dateString: string) {
     return new Date(dateString).toLocaleDateString('en-US', {
       weekday: 'long',
@@ -153,7 +180,25 @@ export default function CampaignDetailPage() {
           <h1 className="text-3xl font-bold text-gray-900">{campaign.name}</h1>
           <p className="text-gray-500 mt-1">{formatDate(campaign.createdAt)}</p>
         </div>
-        {getStatusBadge(campaign.status)}
+        <div className="flex items-center gap-3">
+          {getStatusBadge(campaign.status)}
+          {campaign.status === 'running' && (
+            <button
+              onClick={pauseCampaign}
+              className="px-3 py-1.5 text-sm font-medium text-yellow-700 bg-yellow-100 hover:bg-yellow-200 rounded-lg transition-colors"
+            >
+              Pause
+            </button>
+          )}
+          {campaign.status === 'paused' && (
+            <button
+              onClick={resumeCampaign}
+              className="px-3 py-1.5 text-sm font-medium text-green-700 bg-green-100 hover:bg-green-200 rounded-lg transition-colors"
+            >
+              Resume
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Progress Bar */}

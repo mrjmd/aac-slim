@@ -289,8 +289,11 @@ export function filterResults(results: PhoneValidationResult[]): ScrubResult {
       continue
     }
 
-    // Inactive/Invalid/Not verified
-    if (result.STATUS !== 'ACTIVE') {
+    // Only remove confirmed bad numbers
+    // INACTIVE = confirmed disconnected
+    // INVALID = bad phone format
+    // NOT_VERIFIED = couldn't verify - these are usually fine, let them through
+    if (result.STATUS === 'INACTIVE' || result.STATUS === 'INVALID') {
       removed.inactive.push(result)
       continue
     }

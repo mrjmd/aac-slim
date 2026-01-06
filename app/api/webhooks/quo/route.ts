@@ -40,6 +40,15 @@ const log = logger.child({ handler: 'quo-webhook' })
 // Quo webhook event types we handle
 type QuoEventType = 'call.completed' | 'call.ringing' | 'message.received' | 'message.delivered' | 'call.transcript.completed'
 
+// Dialogue entry in a call transcript
+interface TranscriptDialogueEntry {
+  start: number
+  end: number
+  content: string
+  identifier: string // Phone number E.164
+  userId?: string // Present if from internal user, absent if from external caller
+}
+
 // Quo webhook payload structure (API v3)
 // Wrapped in "object" with nested "data.object"
 interface QuoWebhookPayload {
@@ -52,14 +61,16 @@ interface QuoWebhookPayload {
       object: {
         // Common fields
         id: string
-        object: 'message' | 'call'
-        direction: 'incoming' | 'outgoing'
-        from: string // E.164 phone
-        to: string // E.164 phone
+        object: 'message' | 'call' | 'callTranscript'
         createdAt: string
-        userId: string
-        phoneNumberId: string
-        conversationId: string
+
+        // For messages and calls
+        direction?: 'incoming' | 'outgoing'
+        from?: string // E.164 phone
+        to?: string // E.164 phone
+        userId?: string
+        phoneNumberId?: string
+        conversationId?: string
 
         // For messages
         body?: string
@@ -71,7 +82,12 @@ interface QuoWebhookPayload {
         recordingUrl?: string
         voicemailUrl?: string
         answeredAt?: string
+
+        // For transcripts
+        callId?: string // Reference to original call
+        dialogue?: TranscriptDialogueEntry[]
       }
+      deepLink?: string
     }
   }
 }
@@ -130,6 +146,26 @@ function verifySignature(
 const MIN_MESSAGE_LENGTH = 10
 
 /**
+ * Extract text content from event data for AI processing
+ * For messages: returns body
+ * For transcripts: returns formatted dialogue from external caller only
+ */
+function extractTextForAI(eventData: QuoWebhookPayload['object']['data']['object']): string {
+  // For transcripts, extract just the external caller's dialogue
+  if (eventData.object === 'callTranscript' && eventData.dialogue) {
+    // Get only entries from external caller (no userId)
+    const externalDialogue = eventData.dialogue
+      .filter(entry => !entry.userId)
+      .map(entry => entry.content)
+      .join(' ')
+    return externalDialogue
+  }
+
+  // For messages, use body
+  return eventData.body || ''
+}
+
+/**
  * Check if a message should be processed by AI for entity extraction
  * Rules: Only inbound messages/transcripts with sufficient content
  */
@@ -141,15 +177,19 @@ function shouldProcessForAI(
   if (eventType === 'message.delivered') return false // Outbound SMS
   if (eventType === 'call.completed') return false // Call without transcript
 
-  // For transcripts, check direction
+  // For transcripts, always process (external caller initiated)
   if (eventType === 'call.transcript.completed') {
-    if (eventData.direction === 'outgoing') return false
+    // Check if we have dialogue from external caller
+    if (eventData.dialogue) {
+      const externalDialogue = eventData.dialogue.filter(entry => !entry.userId)
+      if (externalDialogue.length === 0) return false
+    }
   }
 
   // Get the text content
-  const text = eventData.body || ''
+  const text = extractTextForAI(eventData)
 
-  // Skip trivial messages
+  // Skip trivial content
   if (text.length < MIN_MESSAGE_LENGTH) return false
 
   return true
@@ -159,9 +199,20 @@ function shouldProcessForAI(
  * Extract the remote (external) phone number from the event data
  * For incoming: it's the "from" number
  * For outgoing: it's the "to" number
+ * For transcripts: find dialogue entries without userId (external caller)
  */
 function extractRemotePhone(eventData: QuoWebhookPayload['object']['data']['object']): string | null {
-  // All event types now use from/to fields directly
+  // For transcripts, extract from dialogue entries
+  if (eventData.object === 'callTranscript' && eventData.dialogue) {
+    // Find an entry from the external caller (no userId = not internal user)
+    const externalEntry = eventData.dialogue.find(entry => !entry.userId)
+    if (externalEntry) {
+      return externalEntry.identifier || null
+    }
+    return null
+  }
+
+  // For messages and calls, use from/to based on direction
   if (eventData.direction === 'incoming') {
     return eventData.from || null
   } else {
@@ -346,7 +397,16 @@ export async function POST(request: Request) {
     }
 
     if (event.type === 'call.transcript.completed') {
-      const transcript = eventData.body || '(no transcript)'
+      // Format transcript dialogue for activity note
+      let transcript = '(no transcript)'
+      if (eventData.dialogue && eventData.dialogue.length > 0) {
+        transcript = eventData.dialogue
+          .map(entry => {
+            const speaker = entry.userId ? 'AAC' : 'Caller'
+            return `${speaker}: ${entry.content}`
+          })
+          .join('\n')
+      }
 
       await logActivity(pipedrivePersonId, 'call', {
         subject: 'Call Transcript Available',
@@ -407,7 +467,7 @@ export async function POST(request: Request) {
     // AI ENTITY EXTRACTION (Module 1.3)
     // ============================================
     if (shouldProcessForAI(event.type, eventData)) {
-      const textContent = eventData.body || ''
+      const textContent = extractTextForAI(eventData)
       log.info('Processing for AI entity extraction', {
         personId: pipedrivePersonId,
         type: event.type,

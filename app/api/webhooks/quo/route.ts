@@ -40,54 +40,86 @@ const log = logger.child({ handler: 'quo-webhook' })
 // Quo webhook event types we handle
 type QuoEventType = 'call.completed' | 'call.ringing' | 'message.received' | 'message.delivered' | 'call.transcript.completed'
 
-// Quo webhook payload structure
+// Quo webhook payload structure (API v3)
+// Wrapped in "object" with nested "data.object"
 interface QuoWebhookPayload {
-  id: string // Event ID for deduplication
-  type: QuoEventType
-  createdAt: string
-  data: {
-    // For calls
-    object?: 'call'
-    id?: string
-    direction?: 'incoming' | 'outgoing'
-    from?: string // E.164 phone
-    to?: string // E.164 phone
-    status?: 'completed' | 'missed' | 'voicemail'
-    duration?: number // seconds
-    recordingUrl?: string
-    voicemailUrl?: string
+  object: {
+    id: string // Event ID for deduplication
+    type: QuoEventType
+    createdAt: string
+    apiVersion: string
+    data: {
+      object: {
+        // Common fields
+        id: string
+        object: 'message' | 'call'
+        direction: 'incoming' | 'outgoing'
+        from: string // E.164 phone
+        to: string // E.164 phone
+        createdAt: string
+        userId: string
+        phoneNumberId: string
+        conversationId: string
 
-    // For messages
-    conversationId?: string
-    phoneNumber?: string // Our number
-    body?: string
-    participants?: Array<{
-      phoneNumber: string
-      name?: string
-    }>
+        // For messages
+        body?: string
+        media?: Array<{ url: string; type: string }>
+        status?: 'received' | 'sent' | 'delivered' | 'queued'
+
+        // For calls
+        duration?: number // seconds
+        recordingUrl?: string
+        voicemailUrl?: string
+        answeredAt?: string
+      }
+    }
   }
 }
 
 /**
  * Verify webhook signature from Quo/OpenPhone
- * https://www.openphone.com/docs/webhooks#webhook-verification
+ *
+ * Header format: hmac;1;<timestamp>;<base64-signature>
+ * Signed data: <timestamp>.<json-payload>
+ * Secret: base64-encoded, must decode to binary for HMAC
  */
 function verifySignature(
   payload: string,
-  signature: string | undefined,
+  signatureHeader: string | undefined,
   secret: string
 ): boolean {
-  if (!signature) return false
+  if (!signatureHeader) return false
 
-  const expected = crypto
-    .createHmac('sha256', secret)
-    .update(payload)
-    .digest('hex')
+  // Parse header: hmac;1;timestamp;signature
+  const parts = signatureHeader.split(';')
+  if (parts.length !== 4) {
+    log.warn('Invalid signature header format', { parts: parts.length })
+    return false
+  }
+
+  const [scheme, version, timestamp, providedSignature] = parts
+
+  if (scheme !== 'hmac' || version !== '1') {
+    log.warn('Unsupported signature scheme/version', { scheme, version })
+    return false
+  }
+
+  // Prepare signed data: timestamp.payload
+  const signedData = `${timestamp}.${payload}`
+
+  // Decode secret from base64 to binary
+  const signingKey = Buffer.from(secret, 'base64')
+
+  // Compute HMAC-SHA256 and encode as base64
+  const computedSignature = crypto
+    .createHmac('sha256', signingKey)
+    .update(signedData)
+    .digest('base64')
 
   try {
     return crypto.timingSafeEqual(
-      Buffer.from(signature),
-      Buffer.from(expected)
+      Buffer.from(providedSignature),
+      Buffer.from(computedSignature)
     )
   } catch {
     return false
@@ -101,18 +133,21 @@ const MIN_MESSAGE_LENGTH = 10
  * Check if a message should be processed by AI for entity extraction
  * Rules: Only inbound messages/transcripts with sufficient content
  */
-function shouldProcessForAI(payload: QuoWebhookPayload): boolean {
+function shouldProcessForAI(
+  eventType: QuoEventType,
+  eventData: QuoWebhookPayload['object']['data']['object']
+): boolean {
   // Only process inbound messages and transcripts
-  if (payload.type === 'message.delivered') return false // Outbound SMS
-  if (payload.type === 'call.completed') return false // Call without transcript
+  if (eventType === 'message.delivered') return false // Outbound SMS
+  if (eventType === 'call.completed') return false // Call without transcript
 
   // For transcripts, check direction
-  if (payload.type === 'call.transcript.completed') {
-    if (payload.data.direction === 'outgoing') return false
+  if (eventType === 'call.transcript.completed') {
+    if (eventData.direction === 'outgoing') return false
   }
 
   // Get the text content
-  const text = payload.data.body || ''
+  const text = eventData.body || ''
 
   // Skip trivial messages
   if (text.length < MIN_MESSAGE_LENGTH) return false
@@ -121,41 +156,17 @@ function shouldProcessForAI(payload: QuoWebhookPayload): boolean {
 }
 
 /**
- * Extract the remote (external) phone number from the event
+ * Extract the remote (external) phone number from the event data
  * For incoming: it's the "from" number
  * For outgoing: it's the "to" number
  */
-function extractRemotePhone(payload: QuoWebhookPayload): string | null {
-  const { type, data } = payload
-
-  if (type === 'call.completed' || type === 'call.ringing') {
-    // For calls, use from/to based on direction
-    if (data.direction === 'incoming') {
-      return data.from || null
-    } else {
-      return data.to || null
-    }
+function extractRemotePhone(eventData: QuoWebhookPayload['object']['data']['object']): string | null {
+  // All event types now use from/to fields directly
+  if (eventData.direction === 'incoming') {
+    return eventData.from || null
+  } else {
+    return eventData.to || null
   }
-
-  if (type === 'message.received' || type === 'message.delivered') {
-    // For messages, find the participant that isn't our number
-    const ourNumber = data.phoneNumber
-    const participant = data.participants?.find(
-      (p) => p.phoneNumber !== ourNumber
-    )
-    return participant?.phoneNumber || null
-  }
-
-  if (type === 'call.transcript.completed') {
-    // Transcripts are associated with calls, use same logic as calls
-    if (data.direction === 'incoming') {
-      return data.from || null
-    } else {
-      return data.to || null
-    }
-  }
-
-  return null
 }
 
 /**
@@ -184,15 +195,41 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 })
   }
 
-  // Basic validation
-  if (!payload?.id || !payload?.type) {
-    log.warn('Invalid payload', { hasBody: !!payload })
+  // Handle both wrapped and unwrapped payload formats
+  // Wrapped: { object: { id, type, data: { object: {...} } } }
+  // Unwrapped: { id, type, data: { object: {...} } }
+  const rawPayload = payload as unknown as Record<string, unknown>
+
+  // Detect format and normalize
+  let event: QuoWebhookPayload['object']
+  if (rawPayload?.object && typeof rawPayload.object === 'object') {
+    // Wrapped format
+    event = rawPayload.object as QuoWebhookPayload['object']
+  } else if (rawPayload?.id && rawPayload?.type) {
+    // Unwrapped format - payload IS the event
+    event = rawPayload as unknown as QuoWebhookPayload['object']
+  } else {
+    log.warn('Invalid payload structure', {
+      keys: Object.keys(rawPayload || {}),
+    })
     return NextResponse.json({ error: 'Invalid payload' }, { status: 400 })
   }
 
+  // Validate event has required fields
+  if (!event?.id || !event?.type || !event?.data?.object) {
+    log.warn('Invalid event structure', {
+      hasId: !!event?.id,
+      hasType: !!event?.type,
+      hasData: !!event?.data,
+    })
+    return NextResponse.json({ error: 'Invalid payload' }, { status: 400 })
+  }
+
+  const eventData = event.data.object
+
   log.info('Received Quo webhook', {
-    eventId: payload.id,
-    type: payload.type,
+    eventId: event.id,
+    type: event.type,
   })
 
   // ============================================
@@ -200,8 +237,8 @@ export async function POST(request: Request) {
   // ============================================
   // Process calls, messages (both directions), and transcripts
   const allowedEvents: QuoEventType[] = ['call.completed', 'message.received', 'message.delivered', 'call.transcript.completed']
-  if (!allowedEvents.includes(payload.type)) {
-    log.debug('Ignoring event type', { type: payload.type })
+  if (!allowedEvents.includes(event.type)) {
+    log.debug('Ignoring event type', { type: event.type })
     return NextResponse.json({ status: 'ignored', reason: 'event_type' })
   }
 
@@ -209,18 +246,18 @@ export async function POST(request: Request) {
     // ============================================
     // DEDUPLICATION
     // ============================================
-    const isNew = await markEventProcessed('quo', payload.id)
+    const isNew = await markEventProcessed('quo', event.id)
     if (!isNew) {
-      log.info('Duplicate event ignored', { eventId: payload.id })
+      log.info('Duplicate event ignored', { eventId: event.id })
       return NextResponse.json({ status: 'ignored', reason: 'duplicate' })
     }
 
     // ============================================
     // EXTRACT & VALIDATE PHONE
     // ============================================
-    const rawPhone = extractRemotePhone(payload)
+    const rawPhone = extractRemotePhone(eventData)
     if (!rawPhone) {
-      log.warn('Could not extract remote phone', { eventId: payload.id })
+      log.warn('Could not extract remote phone', { eventId: event.id })
       return NextResponse.json({ status: 'skipped', reason: 'no_phone' })
     }
 
@@ -271,17 +308,16 @@ export async function POST(request: Request) {
     // ============================================
     // LOG ACTIVITY
     // ============================================
-    if (payload.type === 'call.completed') {
-      const direction = payload.data.direction === 'incoming' ? 'Inbound' : 'Outbound'
-      const duration = payload.data.duration || 0
-      const status = payload.data.status || 'completed'
+    if (event.type === 'call.completed') {
+      const direction = eventData.direction === 'incoming' ? 'Inbound' : 'Outbound'
+      const duration = eventData.duration || 0
 
-      let note = `${direction} call - ${status}`
-      if (payload.data.recordingUrl) {
-        note += `\n\nRecording: ${payload.data.recordingUrl}`
+      let note = `${direction} call`
+      if (eventData.recordingUrl) {
+        note += `\n\nRecording: ${eventData.recordingUrl}`
       }
-      if (payload.data.voicemailUrl) {
-        note += `\n\nVoicemail: ${payload.data.voicemailUrl}`
+      if (eventData.voicemailUrl) {
+        note += `\n\nVoicemail: ${eventData.voicemailUrl}`
       }
 
       await logActivity(pipedrivePersonId, 'call', {
@@ -293,13 +329,13 @@ export async function POST(request: Request) {
       log.info('Logged call activity', { personId: pipedrivePersonId, duration })
     }
 
-    if (payload.type === 'message.received' || payload.type === 'message.delivered') {
-      const messageBody = payload.data.body || '(no content)'
+    if (event.type === 'message.received' || event.type === 'message.delivered') {
+      const messageBody = eventData.body || '(no content)'
       const truncatedBody = messageBody.length > 100
         ? messageBody.substring(0, 100) + '...'
         : messageBody
 
-      const direction = payload.type === 'message.received' ? 'Received' : 'Sent'
+      const direction = event.type === 'message.received' ? 'Received' : 'Sent'
 
       await logActivity(pipedrivePersonId, 'sms', {
         subject: `SMS ${direction}: "${truncatedBody}"`,
@@ -309,8 +345,8 @@ export async function POST(request: Request) {
       log.info('Logged SMS activity', { personId: pipedrivePersonId, direction })
     }
 
-    if (payload.type === 'call.transcript.completed') {
-      const transcript = payload.data.body || '(no transcript)'
+    if (event.type === 'call.transcript.completed') {
+      const transcript = eventData.body || '(no transcript)'
 
       await logActivity(pipedrivePersonId, 'call', {
         subject: 'Call Transcript Available',
@@ -323,8 +359,8 @@ export async function POST(request: Request) {
     // ============================================
     // CAMPAIGN RESPONSE TRACKING (Module 3)
     // ============================================
-    if (payload.type === 'message.received') {
-      const messageBody = payload.data.body || ''
+    if (event.type === 'message.received') {
+      const messageBody = eventData.body || ''
 
       // Check if this phone is part of any active campaign
       const campaignResult = await findCampaignForPhone(e164Phone)
@@ -370,11 +406,11 @@ export async function POST(request: Request) {
     // ============================================
     // AI ENTITY EXTRACTION (Module 1.3)
     // ============================================
-    if (shouldProcessForAI(payload)) {
-      const textContent = payload.data.body || ''
+    if (shouldProcessForAI(event.type, eventData)) {
+      const textContent = eventData.body || ''
       log.info('Processing for AI entity extraction', {
         personId: pipedrivePersonId,
-        type: payload.type,
+        type: event.type,
         textLength: textContent.length,
       })
 
@@ -427,13 +463,13 @@ export async function POST(request: Request) {
     return NextResponse.json({
       status: 'processed',
       pipedrivePersonId,
-      eventType: payload.type,
+      eventType: event.type,
     })
   } catch (error) {
-    log.error('Webhook processing failed', error as Error, { eventId: payload.id })
+    log.error('Webhook processing failed', error as Error, { eventId: event.id })
 
     // Log error for health dashboard
-    await logHealthError('quo', (error as Error).message, payload.id)
+    await logHealthError('quo', (error as Error).message, event.id)
 
     // Return 200 to acknowledge receipt
     return NextResponse.json({

@@ -1044,7 +1044,7 @@ function NewCampaignPageContent() {
           <div className="grid grid-cols-2 md:grid-cols-3 gap-4 mb-6">
             <div className="bg-blue-50 rounded-lg p-4 border border-blue-200">
               <p className="text-xs font-semibold text-blue-700 uppercase">Total Contacts</p>
-              <p className="text-2xl font-bold text-blue-800">{previewResult.processed}</p>
+              <p className="text-2xl font-bold text-blue-800">{parsedContacts.length.toLocaleString()}</p>
             </div>
             {previewResult.isMultiDay ? (
               <div className="bg-indigo-50 rounded-lg p-4 border border-indigo-200">
@@ -1070,9 +1070,9 @@ function NewCampaignPageContent() {
             <div className="bg-indigo-50 rounded-lg p-4 mb-6 border border-indigo-200">
               <p className="text-sm font-semibold text-indigo-800 mb-2">Multi-Day Campaign</p>
               <div className="text-sm text-indigo-700 space-y-1">
-                <p>This campaign will send <strong>{previewResult.dailyLimit}</strong> messages per day over <strong>~{previewResult.estimatedTotalDays} days</strong>.</p>
-                <p>Day 1: {previewResult.batchSize} contacts will be sent today.</p>
-                <p>Remaining: {previewResult.remainingContacts?.toLocaleString()} contacts queued for subsequent days.</p>
+                <p>This campaign will send <strong>{previewResult.dailyLimit}</strong> messages per day over <strong>~{Math.ceil(parsedContacts.length / (previewResult.dailyLimit || 125))} days</strong>.</p>
+                <p>Day 1: {Math.min(parsedContacts.length, previewResult.dailyLimit || 125)} contacts will be sent.</p>
+                <p>Remaining: {Math.max(0, parsedContacts.length - (previewResult.dailyLimit || 125)).toLocaleString()} contacts queued for subsequent days.</p>
               </div>
             </div>
           )}
@@ -1082,25 +1082,12 @@ function NewCampaignPageContent() {
             <div className="bg-purple-50 rounded-lg p-4 mb-6 border border-purple-200">
               <p className="text-sm font-semibold text-purple-800 mb-2">A/B Test Split</p>
               <div className="flex gap-4">
-                {previewResult.isMultiDay ? (
-                  <>
-                    <span className="text-sm text-purple-700">
-                      Variant A: ~{Math.round(previewResult.processed / 2).toLocaleString()} contacts (50%)
-                    </span>
-                    <span className="text-sm text-purple-700">
-                      Variant B: ~{Math.round(previewResult.processed / 2).toLocaleString()} contacts (50%)
-                    </span>
-                  </>
-                ) : (
-                  <>
-                    <span className="text-sm text-purple-700">
-                      Variant A: {previewResult.variantCounts.A} contacts
-                    </span>
-                    <span className="text-sm text-purple-700">
-                      Variant B: {previewResult.variantCounts.B} contacts
-                    </span>
-                  </>
-                )}
+                <span className="text-sm text-purple-700">
+                  Variant A: ~{Math.round(parsedContacts.length / 2).toLocaleString()} contacts (50%)
+                </span>
+                <span className="text-sm text-purple-700">
+                  Variant B: ~{Math.round(parsedContacts.length / 2).toLocaleString()} contacts (50%)
+                </span>
               </div>
               {previewResult.isMultiDay && (
                 <p className="text-xs text-purple-600 mt-2">
@@ -1256,7 +1243,7 @@ function NewCampaignPageContent() {
               <div className="grid grid-cols-2 md:grid-cols-3 gap-4 mb-6">
                 <div className="bg-blue-50 rounded-lg p-4 border border-blue-200">
                   <p className="text-xs font-semibold text-blue-700 uppercase">Total Contacts</p>
-                  <p className="text-2xl font-bold text-blue-800">{previewResult.processed}</p>
+                  <p className="text-2xl font-bold text-blue-800">{parsedContacts.length.toLocaleString()}</p>
                   <p className="text-xs text-blue-600">Before scrubbing</p>
                 </div>
                 {previewResult.isMultiDay ? (
@@ -1283,7 +1270,7 @@ function NewCampaignPageContent() {
                 <div className="bg-indigo-50 rounded-lg p-4 mb-6 border border-indigo-200">
                   <p className="text-sm font-semibold text-indigo-800 mb-1">Multi-Day Campaign</p>
                   <p className="text-sm text-indigo-700">
-                    {previewResult.processed.toLocaleString()} contacts will be sent over ~{previewResult.estimatedTotalDays} days at {previewResult.dailyLimit}/day.
+                    {parsedContacts.length.toLocaleString()} contacts will be sent over ~{Math.ceil(parsedContacts.length / (previewResult.dailyLimit || 125))} days at {previewResult.dailyLimit}/day.
                   </p>
                 </div>
               )}
@@ -1293,7 +1280,7 @@ function NewCampaignPageContent() {
                 <div className="bg-purple-50 rounded-lg p-4 mb-6 border border-purple-200">
                   <p className="text-sm font-semibold text-purple-800">A/B Test: 50/50 Split</p>
                   <p className="text-sm text-purple-700">
-                    ~{Math.round(previewResult.processed / 2).toLocaleString()} contacts per variant
+                    ~{Math.round(parsedContacts.length / 2).toLocaleString()} contacts per variant
                   </p>
                 </div>
               )}
@@ -1349,7 +1336,7 @@ function NewCampaignPageContent() {
                   }}
                   className="flex-1 bg-blue-600 text-white px-4 py-3 rounded-lg hover:bg-blue-700 font-semibold transition-colors"
                 >
-                  {devModeSkipScrub ? 'Skip Scrub (Dev Mode)' : `Scrub ${previewResult.processed.toLocaleString()} Contacts`}
+                  {devModeSkipScrub ? 'Skip Scrub (Dev Mode)' : `Scrub ${parsedContacts.length.toLocaleString()} Contacts`}
                 </button>
               </div>
             </div>

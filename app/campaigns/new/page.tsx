@@ -48,10 +48,13 @@ interface PreFilterStats {
     optout: number
     dnc: number
     litigator: number
+    landline: number
+    inactive: number
     previousCampaign: number
     openphoneHistory: number
   }
   remaining: number
+  verifiedCleanFromCache?: number
 }
 
 interface CleanContact {
@@ -270,6 +273,7 @@ function NewCampaignPageContent() {
   const [cleanContacts, setCleanContacts] = useState<ParsedContact[]>([])
   const [preFilterStats, setPreFilterStats] = useState<PreFilterStats | null>(null)
   const [preFilteredPhones, setPreFilteredPhones] = useState<Array<{id: string, phone: string}> | null>(null)
+  const [cachedCleanPhones, setCachedCleanPhones] = useState<Array<{id: string, phone: string}> | null>(null)
   const [scrubStarted, setScrubStarted] = useState(false)
 
   // Preview/result state
@@ -526,7 +530,7 @@ function NewCampaignPageContent() {
 
       const decoder = new TextDecoder()
       let buffer = ''
-      let preFilteredResult: { preFilteredPhones: Array<{id: string, phone: string}>, preFilterStats: PreFilterStats } | null = null
+      let preFilteredResult: { preFilteredPhones: Array<{id: string, phone: string}>, preFilterStats: PreFilterStats, verifiedCleanPhones: Array<{id: string, phone: string}> } | null = null
 
       while (true) {
         const { done, value } = await reader.read()
@@ -560,9 +564,11 @@ function NewCampaignPageContent() {
               preFilteredResult = {
                 preFilteredPhones: data.preFilteredPhones,
                 preFilterStats: data.preFilterStats,
+                verifiedCleanPhones: data.verifiedCleanPhones || [],
               }
               setPreFilterStats(data.preFilterStats)
               setPreFilteredPhones(data.preFilteredPhones)
+              setCachedCleanPhones(data.verifiedCleanPhones || [])
             } else if (eventType === 'error') {
               throw new Error(data.message)
             }
@@ -574,8 +580,10 @@ function NewCampaignPageContent() {
         throw new Error('Pre-filter did not complete')
       }
 
-      // All phones were pre-filtered out
-      if (preFilteredResult.preFilteredPhones.length === 0) {
+      const cachedClean = preFilteredResult.verifiedCleanPhones || []
+
+      // All phones were pre-filtered out (no clean, no need for SearchBug)
+      if (preFilteredResult.preFilteredPhones.length === 0 && cachedClean.length === 0) {
         setScrubResult({
           status: 'complete',
           summary: {
@@ -583,8 +591,8 @@ function NewCampaignPageContent() {
             clean: 0,
             dnc: preFilteredResult.preFilterStats.removed.dnc,
             litigator: preFilteredResult.preFilterStats.removed.litigator,
-            landline: 0,
-            inactive: 0,
+            landline: preFilteredResult.preFilterStats.removed.landline || 0,
+            inactive: preFilteredResult.preFilterStats.removed.inactive || 0,
           },
           clean: [],
           removed: { dnc: [], litigator: [], landline: [], inactive: [] },
@@ -595,7 +603,38 @@ function NewCampaignPageContent() {
         return
       }
 
-      // PHASE 4: Submit to SearchBug
+      // All remaining phones are already verified clean - skip SearchBug!
+      if (preFilteredResult.preFilteredPhones.length === 0 && cachedClean.length > 0) {
+        setScrubProgress('All phones verified from cache - skipping SearchBug!')
+        const cachedCleanSet = new Set(cachedClean.map(c => c.phone))
+        const cleanContactList = parsedContacts.filter(c => cachedCleanSet.has(c.phone))
+
+        setScrubResult({
+          status: 'complete',
+          summary: {
+            total: preFilteredResult.preFilterStats.original,
+            clean: cachedClean.length,
+            dnc: preFilteredResult.preFilterStats.removed.dnc,
+            litigator: preFilteredResult.preFilterStats.removed.litigator,
+            landline: preFilteredResult.preFilterStats.removed.landline || 0,
+            inactive: preFilteredResult.preFilterStats.removed.inactive || 0,
+          },
+          clean: cachedClean.map(c => ({
+            id: c.id,
+            phone: c.phone,
+            carrier: 'cached',
+            type: 'cached',
+            state: 'cached',
+          })),
+          removed: { dnc: [], litigator: [], landline: [], inactive: [] },
+        })
+        setCleanContacts(cleanContactList)
+        setScrubProgress('')
+        setLoading(false)
+        return
+      }
+
+      // PHASE 4: Submit to SearchBug (only phones not in cache)
       await submitToSearchBug(preFilteredResult.preFilteredPhones, preFilteredResult.preFilterStats)
 
     } catch (err) {
@@ -654,12 +693,29 @@ function NewCampaignPageContent() {
           setScrubProgress(`Validating... ${data.percent || '0%'} (${data.minutesLeft || '?'} min left)`)
         } else if (data.status === 'complete') {
           clearInterval(pollInterval)
-          setScrubResult(data)
 
-          const cleanPhoneSet = new Set(data.clean.map((c: CleanContact) => c.phone))
-          const cleanContactList = parsedContacts.filter(c =>
-            cleanPhoneSet.has(c.phone.replace('+1', '').replace('+', ''))
-          )
+          // Combine SearchBug clean phones + cached clean phones
+          const searchBugCleanPhones = new Set(data.clean.map((c: CleanContact) => c.phone))
+          const cachedCleanSet = new Set((cachedCleanPhones || []).map(c => c.phone))
+
+          // Add cached phones to the summary
+          const totalClean = data.summary.clean + (cachedCleanPhones?.length || 0)
+          const updatedSummary = {
+            ...data.summary,
+            clean: totalClean,
+            cachedClean: cachedCleanPhones?.length || 0,
+          }
+
+          setScrubResult({
+            ...data,
+            summary: updatedSummary,
+          })
+
+          // Build clean contact list from both sources
+          const cleanContactList = parsedContacts.filter(c => {
+            const phoneNormalized = c.phone.replace('+1', '').replace('+', '')
+            return searchBugCleanPhones.has(phoneNormalized) || cachedCleanSet.has(c.phone)
+          })
           setCleanContacts(cleanContactList)
           setScrubProgress('')
         } else if (data.status === 'failed') {
@@ -674,7 +730,7 @@ function NewCampaignPageContent() {
     }, 3000)
 
     return () => clearInterval(pollInterval)
-  }, [scrubKey, step, parsedContacts])
+  }, [scrubKey, step, parsedContacts, cachedCleanPhones])
 
   // Start scrub when user clicks scrub button
   useEffect(() => {

@@ -18,9 +18,16 @@ const KEYS = {
   optOutPhones: 'optouts:phones',
   dncPhones: 'suppression:dnc',
   litigatorPhones: 'suppression:litigators',
+  landlinePhones: 'suppression:landlines',
+  inactivePhones: 'suppression:inactive',
+  verifiedClean: 'cache:verified-clean', // Hash with phone -> timestamp
   // Global tracking of all phones ever sent to (across all campaigns)
   everMessaged: 'suppression:ever-messaged',
 }
+
+// Cache TTLs
+const INACTIVE_CACHE_DAYS = 90
+const CLEAN_CACHE_DAYS = 60
 
 /**
  * Add multiple phones to the DNC list
@@ -47,24 +54,163 @@ export async function addManyToLitigatorList(phones: string[]): Promise<void> {
 }
 
 /**
- * Check if a phone is suppressed (opt-out, DNC, or litigator)
+ * Add multiple phones to the landline list (permanent - landlines don't become mobile)
+ */
+export async function addManyToLandlineList(phones: string[]): Promise<void> {
+  if (phones.length === 0) return
+  const redis = getRedis()
+  for (const phone of phones) {
+    await redis.sadd(KEYS.landlinePhones, phone)
+  }
+  console.log(`Added ${phones.length} phones to landline list`)
+}
+
+/**
+ * Add multiple phones to the inactive list with TTL
+ */
+export async function addManyToInactiveList(phones: string[]): Promise<void> {
+  if (phones.length === 0) return
+  const redis = getRedis()
+  const timestamp = Date.now().toString()
+  for (const phone of phones) {
+    await redis.hset(KEYS.inactivePhones, { [phone]: timestamp })
+  }
+  console.log(`Added ${phones.length} phones to inactive cache`)
+}
+
+/**
+ * Add multiple phones to the verified clean cache with TTL
+ */
+export async function addManyToVerifiedClean(phones: string[]): Promise<void> {
+  if (phones.length === 0) return
+  const redis = getRedis()
+  const timestamp = Date.now().toString()
+  for (const phone of phones) {
+    await redis.hset(KEYS.verifiedClean, { [phone]: timestamp })
+  }
+  console.log(`Added ${phones.length} phones to verified clean cache`)
+}
+
+/**
+ * Check if a phone is suppressed (opt-out, DNC, litigator, or landline)
  * Returns the reason if suppressed, null if clean
  */
-export async function checkSuppression(phone: string): Promise<'optout' | 'dnc' | 'litigator' | null> {
+export async function checkSuppression(phone: string): Promise<'optout' | 'dnc' | 'litigator' | 'landline' | null> {
   const redis = getRedis()
 
   // Check in parallel for efficiency
-  const [isOptOut, isDnc, isLit] = await Promise.all([
+  const [isOptOut, isDnc, isLit, isLandline] = await Promise.all([
     redis.sismember(KEYS.optOutPhones, phone),
     redis.sismember(KEYS.dncPhones, phone),
     redis.sismember(KEYS.litigatorPhones, phone),
+    redis.sismember(KEYS.landlinePhones, phone),
   ])
 
   if (isLit === 1) return 'litigator'
   if (isDnc === 1) return 'dnc'
   if (isOptOut === 1) return 'optout'
+  if (isLandline === 1) return 'landline'
 
   return null
+}
+
+/**
+ * Check if a phone was recently verified as inactive (within TTL)
+ */
+export async function isInactiveRecent(phone: string): Promise<boolean> {
+  const redis = getRedis()
+  const timestamp = await redis.hget(KEYS.inactivePhones, phone)
+  if (!timestamp) return false
+
+  const age = Date.now() - parseInt(timestamp as string)
+  const maxAge = INACTIVE_CACHE_DAYS * 24 * 60 * 60 * 1000
+  return age < maxAge
+}
+
+/**
+ * Check if a phone was recently verified as clean (within TTL)
+ */
+export async function isVerifiedCleanRecent(phone: string): Promise<boolean> {
+  const redis = getRedis()
+  const timestamp = await redis.hget(KEYS.verifiedClean, phone)
+  if (!timestamp) return false
+
+  const age = Date.now() - parseInt(timestamp as string)
+  const maxAge = CLEAN_CACHE_DAYS * 24 * 60 * 60 * 1000
+  return age < maxAge
+}
+
+/**
+ * Batch check phones against all caches
+ * Returns categorized results for efficient pre-filtering
+ */
+export async function batchCheckCache(phones: string[]): Promise<{
+  suppressed: Map<string, 'optout' | 'dnc' | 'litigator' | 'landline' | 'inactive'>
+  verifiedClean: Set<string>
+  needsScrub: string[]
+}> {
+  const redis = getRedis()
+  const suppressed = new Map<string, 'optout' | 'dnc' | 'litigator' | 'landline' | 'inactive'>()
+  const verifiedClean = new Set<string>()
+  const needsScrub: string[] = []
+
+  const now = Date.now()
+  const inactiveMaxAge = INACTIVE_CACHE_DAYS * 24 * 60 * 60 * 1000
+  const cleanMaxAge = CLEAN_CACHE_DAYS * 24 * 60 * 60 * 1000
+
+  for (const phone of phones) {
+    // Check permanent suppression lists
+    const [isOptOut, isDnc, isLit, isLandline] = await Promise.all([
+      redis.sismember(KEYS.optOutPhones, phone),
+      redis.sismember(KEYS.dncPhones, phone),
+      redis.sismember(KEYS.litigatorPhones, phone),
+      redis.sismember(KEYS.landlinePhones, phone),
+    ])
+
+    if (isLit === 1) {
+      suppressed.set(phone, 'litigator')
+      continue
+    }
+    if (isDnc === 1) {
+      suppressed.set(phone, 'dnc')
+      continue
+    }
+    if (isOptOut === 1) {
+      suppressed.set(phone, 'optout')
+      continue
+    }
+    if (isLandline === 1) {
+      suppressed.set(phone, 'landline')
+      continue
+    }
+
+    // Check time-limited caches
+    const [inactiveTs, cleanTs] = await Promise.all([
+      redis.hget(KEYS.inactivePhones, phone),
+      redis.hget(KEYS.verifiedClean, phone),
+    ])
+
+    if (inactiveTs) {
+      const age = now - parseInt(inactiveTs as string)
+      if (age < inactiveMaxAge) {
+        suppressed.set(phone, 'inactive')
+        continue
+      }
+    }
+
+    if (cleanTs) {
+      const age = now - parseInt(cleanTs as string)
+      if (age < cleanMaxAge) {
+        verifiedClean.add(phone)
+        continue
+      }
+    }
+
+    // Not in any cache - needs SearchBug scrub
+    needsScrub.push(phone)
+  }
+
+  return { suppressed, verifiedClean, needsScrub }
 }
 
 /**

@@ -1,5 +1,5 @@
 import { NextRequest } from 'next/server'
-import { checkSuppression, checkManyEverMessaged } from '@/app/lib/suppression'
+import { batchCheckCache, checkManyEverMessaged } from '@/app/lib/suppression'
 import { checkManyConversations } from '@/app/lib/openphone'
 
 export const dynamic = 'force-dynamic'
@@ -42,34 +42,51 @@ export async function POST(request: NextRequest) {
           optout: 0,
           dnc: 0,
           litigator: 0,
+          landline: 0,
+          inactive: 0,
           previousCampaign: 0,
           openphoneHistory: 0,
         }
 
-        // PHASE 1: Suppression check
+        // PHASE 1: Check all caches (suppression lists + verified clean/inactive)
         send('progress', {
           phase: 1,
           total: 4,
-          message: 'Checking suppression lists...',
-          detail: `Checking ${validPhones.length} phones against opt-outs, DNC, and litigator lists`,
+          message: 'Checking caches...',
+          detail: `Checking ${validPhones.length} phones against suppression lists and verification cache`,
         })
 
+        const phoneNumbers = validPhones.map(p => p.phone)
+        const cacheResults = await batchCheckCache(phoneNumbers)
+
+        // Track removed phones and verified clean phones
         let afterSuppression: Array<{ id: string; phone: string }> = []
+        let verifiedCleanPhones: Array<{ id: string; phone: string }> = []
+
         for (const phone of validPhones) {
-          const reason = await checkSuppression(phone.phone)
-          if (reason) {
-            removed[reason]++
+          const suppressedReason = cacheResults.suppressed.get(phone.phone)
+          if (suppressedReason) {
+            if (suppressedReason === 'optout') removed.optout++
+            else if (suppressedReason === 'dnc') removed.dnc++
+            else if (suppressedReason === 'litigator') removed.litigator++
+            else if (suppressedReason === 'landline') removed.landline++
+            else if (suppressedReason === 'inactive') removed.inactive++
+          } else if (cacheResults.verifiedClean.has(phone.phone)) {
+            // Already verified clean - skip SearchBug but include in final list
+            verifiedCleanPhones.push(phone)
           } else {
             afterSuppression.push(phone)
           }
         }
 
+        const totalSuppressed = removed.optout + removed.dnc + removed.litigator + removed.landline + removed.inactive
         send('progress', {
           phase: 1,
           total: 4,
-          message: 'Suppression check complete',
-          detail: `Removed ${removed.optout + removed.dnc + removed.litigator} (${removed.optout} opt-outs, ${removed.dnc} DNC, ${removed.litigator} litigators)`,
+          message: 'Cache check complete',
+          detail: `Removed ${totalSuppressed} suppressed, ${verifiedCleanPhones.length} already verified clean, ${afterSuppression.length} need validation`,
           remaining: afterSuppression.length,
+          verifiedClean: verifiedCleanPhones.length,
         })
 
         // PHASE 2: Ever-messaged check
@@ -80,8 +97,8 @@ export async function POST(request: NextRequest) {
           detail: `Checking ${afterSuppression.length} phones against campaign history`,
         })
 
-        const phoneNumbers = afterSuppression.map(p => p.phone)
-        const everMessaged = await checkManyEverMessaged(phoneNumbers)
+        const phonesToCheckHistory = afterSuppression.map(p => p.phone)
+        const everMessaged = await checkManyEverMessaged(phonesToCheckHistory)
 
         let afterEverMessaged: Array<{ id: string; phone: string }> = []
         for (const phone of afterSuppression) {
@@ -176,11 +193,13 @@ export async function POST(request: NextRequest) {
         }
 
         // PHASE 4: Complete
+        // Combine verified clean (from cache) + phones that passed all checks (need SearchBug)
         const totalRemoved = Object.values(removed).reduce((a, b) => a + b, 0)
         const preFilterStats = {
           original: validPhones.length,
           removed,
           remaining: afterOpenPhone.length,
+          verifiedCleanFromCache: verifiedCleanPhones.length,
         }
 
         send('complete', {
@@ -188,7 +207,10 @@ export async function POST(request: NextRequest) {
           total: 4,
           message: 'Pre-filtering complete',
           preFilterStats,
+          // Phones that need SearchBug validation
           preFilteredPhones: afterOpenPhone,
+          // Phones already verified clean (skip SearchBug)
+          verifiedCleanPhones: verifiedCleanPhones,
           totalRemoved,
         })
 

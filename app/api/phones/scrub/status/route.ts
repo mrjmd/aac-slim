@@ -1,6 +1,12 @@
 import { NextResponse } from 'next/server'
 import { getValidationResults, filterResults } from '@/src/clients/searchbug'
-import { addManyToDncList, addManyToLitigatorList } from '@/app/lib/suppression'
+import {
+  addManyToDncList,
+  addManyToLitigatorList,
+  addManyToLandlineList,
+  addManyToInactiveList,
+  addManyToVerifiedClean,
+} from '@/app/lib/suppression'
 
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
@@ -40,14 +46,20 @@ export async function POST(request: Request) {
       // Filter and categorize results
       const scrubbed = filterResults(result.DATA || [])
 
-      // Save DNC and litigators to our internal suppression lists
+      // Save all results to our internal caches
       // This prevents us from paying to re-check them in future campaigns
       const dncPhones = scrubbed.removed.dnc.map(r => r.NUMBER)
       const litigatorPhones = scrubbed.removed.litigator.map(r => r.NUMBER)
+      const landlinePhones = scrubbed.removed.landline.map(r => r.NUMBER)
+      const inactivePhones = scrubbed.removed.inactive.map(r => r.NUMBER)
+      const cleanPhones = scrubbed.clean.map(r => r.NUMBER)
 
       await Promise.all([
         addManyToDncList(dncPhones),
         addManyToLitigatorList(litigatorPhones),
+        addManyToLandlineList(landlinePhones),
+        addManyToInactiveList(inactivePhones),
+        addManyToVerifiedClean(cleanPhones),
       ])
 
       return NextResponse.json({

@@ -94,6 +94,7 @@ export async function POST(request: Request) {
       optout: 0,
       dnc: 0,
       litigator: 0,
+      landline: 0,
       previousCampaign: 0,
       openphoneHistory: 0,
     }

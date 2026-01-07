@@ -256,10 +256,14 @@ export async function waitForValidation(
   throw new Error('SearchBug validation timed out')
 }
 
+interface FilterOptions {
+  includeDnc?: boolean // Include DNC numbers (don't filter them out)
+}
+
 /**
  * Filter validation results into clean and removed categories
  */
-export function filterResults(results: PhoneValidationResult[]): ScrubResult {
+export function filterResults(results: PhoneValidationResult[], options: FilterOptions = {}): ScrubResult {
   const clean: PhoneValidationResult[] = []
   const removed = {
     dnc: [] as PhoneValidationResult[],
@@ -271,14 +275,14 @@ export function filterResults(results: PhoneValidationResult[]): ScrubResult {
   for (const result of results) {
     // Check in priority order (a number can fail multiple checks)
 
-    // TCPA litigator - highest priority removal
+    // TCPA litigator - highest priority removal (always remove, even with includeDnc)
     if (result.TCPA === 'YES') {
       removed.litigator.push(result)
       continue
     }
 
-    // DNC list (Federal, State, or Complainer)
-    if (result.DNC !== 'NO') {
+    // DNC list (Federal, State, or Complainer) - skip if includeDnc is enabled
+    if (result.DNC !== 'NO' && !options.includeDnc) {
       removed.dnc.push(result)
       continue
     }

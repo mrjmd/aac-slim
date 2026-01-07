@@ -1,7 +1,17 @@
 import { NextResponse } from 'next/server'
+import { Redis } from '@upstash/redis'
 import { submitPhoneBatch } from '@/src/clients/searchbug'
 import { checkSuppression, checkManyEverMessaged } from '@/app/lib/suppression'
 import { checkManyConversations } from '@/app/lib/openphone'
+
+function getRedis() {
+  const url = process.env.UPSTASH_REDIS_REST_URL
+  const token = process.env.UPSTASH_REDIS_REST_TOKEN
+  if (!url || !token) {
+    throw new Error('Redis environment variables not configured')
+  }
+  return new Redis({ url, token })
+}
 
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
@@ -25,6 +35,8 @@ interface ScrubStartRequest {
   }>
   // Stats from previous pre-filter run (for display)
   previousPreFilterStats?: PreFilterStats
+  // Include DNC numbers (don't filter them out)
+  includeDnc?: boolean
 }
 
 interface PreFilteredPhone {
@@ -173,6 +185,12 @@ export async function POST(request: Request) {
 
     // Submit remaining phones to SearchBug bulk API
     const { key, estimatedMinutes } = await submitPhoneBatch(afterOpenPhone)
+
+    // Store includeDnc setting with the key (expires in 1 hour)
+    if (body.includeDnc) {
+      const redis = getRedis()
+      await redis.set(`scrub:settings:${key}`, JSON.stringify({ includeDnc: true }), { ex: 3600 })
+    }
 
     // Build message
     let message = ''

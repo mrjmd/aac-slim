@@ -11,6 +11,7 @@ interface PrefilterRequest {
     phone: string
   }>
   skipOpenPhoneCheck?: boolean
+  includeDnc?: boolean // Include DNC numbers (don't filter them out)
 }
 
 /**
@@ -66,6 +67,11 @@ export async function POST(request: NextRequest) {
         for (const phone of validPhones) {
           const suppressedReason = cacheResults.suppressed.get(phone.phone)
           if (suppressedReason) {
+            // Skip DNC filtering if includeDnc is enabled
+            if (suppressedReason === 'dnc' && body.includeDnc) {
+              afterSuppression.push(phone)
+              continue
+            }
             if (suppressedReason === 'optout') removed.optout++
             else if (suppressedReason === 'dnc') removed.dnc++
             else if (suppressedReason === 'litigator') removed.litigator++
@@ -212,6 +218,8 @@ export async function POST(request: NextRequest) {
           // Phones already verified clean (skip SearchBug)
           verifiedCleanPhones: verifiedCleanPhones,
           totalRemoved,
+          // Pass through settings for scrub
+          includeDnc: body.includeDnc || false,
         })
 
         controller.close()

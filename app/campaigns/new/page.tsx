@@ -253,6 +253,7 @@ function NewCampaignPageContent() {
   const [messageA, setMessageA] = useState('')
   const [messageB, setMessageB] = useState('')
   const [skipDedup, setSkipDedup] = useState(false)
+  const [includeDnc, setIncludeDnc] = useState(false) // Include DNC numbers (risky!)
   const [scheduleEnabled, setScheduleEnabled] = useState(false)
   const [scheduledDate, setScheduledDate] = useState('')
   const [scheduledTime, setScheduledTime] = useState('')
@@ -514,7 +515,7 @@ function NewCampaignPageContent() {
       const prefilterRes = await fetch('/api/phones/prefilter', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ phones: phonesToScrub }),
+        body: JSON.stringify({ phones: phonesToScrub, includeDnc }),
       })
 
       if (!prefilterRes.ok) {
@@ -530,7 +531,7 @@ function NewCampaignPageContent() {
 
       const decoder = new TextDecoder()
       let buffer = ''
-      let preFilteredResult: { preFilteredPhones: Array<{id: string, phone: string}>, preFilterStats: PreFilterStats, verifiedCleanPhones: Array<{id: string, phone: string}> } | null = null
+      let preFilteredResult: { preFilteredPhones: Array<{id: string, phone: string}>, preFilterStats: PreFilterStats, verifiedCleanPhones: Array<{id: string, phone: string}>, includeDnc?: boolean } | null = null
 
       while (true) {
         const { done, value } = await reader.read()
@@ -565,6 +566,7 @@ function NewCampaignPageContent() {
                 preFilteredPhones: data.preFilteredPhones,
                 preFilterStats: data.preFilterStats,
                 verifiedCleanPhones: data.verifiedCleanPhones || [],
+                includeDnc: data.includeDnc || false,
               }
               setPreFilterStats(data.preFilterStats)
               setPreFilteredPhones(data.preFilteredPhones)
@@ -635,7 +637,7 @@ function NewCampaignPageContent() {
       }
 
       // PHASE 4: Submit to SearchBug (only phones not in cache)
-      await submitToSearchBug(preFilteredResult.preFilteredPhones, preFilteredResult.preFilterStats)
+      await submitToSearchBug(preFilteredResult.preFilteredPhones, preFilteredResult.preFilterStats, preFilteredResult.includeDnc)
 
     } catch (err) {
       setError((err as Error).message)
@@ -648,7 +650,8 @@ function NewCampaignPageContent() {
   // Helper function to submit to SearchBug
   const submitToSearchBug = async (
     phones: Array<{id: string, phone: string}>,
-    stats: PreFilterStats | null
+    stats: PreFilterStats | null,
+    includeDncSetting?: boolean
   ) => {
     setScrubProgress(`Phase 4/4: Submitting ${phones.length} phones to SearchBug...`)
 
@@ -658,6 +661,7 @@ function NewCampaignPageContent() {
       body: JSON.stringify({
         preFilteredPhones: phones,
         previousPreFilterStats: stats,
+        includeDnc: includeDncSetting || false,
       }),
     })
 
@@ -1002,6 +1006,26 @@ function NewCampaignPageContent() {
                 Skip deduplication (send to contacts with existing conversations)
               </span>
             </label>
+          </div>
+
+          {/* DNC Toggle */}
+          <div className="mt-4">
+            <label className="flex items-center cursor-pointer">
+              <input
+                type="checkbox"
+                checked={includeDnc}
+                onChange={(e) => setIncludeDnc(e.target.checked)}
+                className="rounded border-red-300 text-red-600 focus:ring-red-500"
+              />
+              <span className="ml-2 text-sm text-red-700 font-medium">
+                Include DNC numbers (use with caution)
+              </span>
+            </label>
+            {includeDnc && (
+              <p className="text-xs text-red-600 mt-1 ml-6">
+                Warning: Texting DNC numbers may violate TCPA regulations. Only enable if you have express consent or an existing business relationship.
+              </p>
+            )}
           </div>
 
           {/* Follow-up Message */}

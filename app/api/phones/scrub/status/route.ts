@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server'
+import { Redis } from '@upstash/redis'
 import { getValidationResults, filterResults } from '@/src/clients/searchbug'
 import {
   addManyToDncList,
@@ -7,6 +8,15 @@ import {
   addManyToInactiveList,
   addManyToVerifiedClean,
 } from '@/app/lib/suppression'
+
+function getRedis() {
+  const url = process.env.UPSTASH_REDIS_REST_URL
+  const token = process.env.UPSTASH_REDIS_REST_TOKEN
+  if (!url || !token) {
+    throw new Error('Redis environment variables not configured')
+  }
+  return new Redis({ url, token })
+}
 
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
@@ -43,8 +53,14 @@ export async function POST(request: Request) {
     }
 
     if (result.STATUS === 'Complete') {
+      // Check if includeDnc setting was stored with this scrub
+      const redis = getRedis()
+      const settingsRaw = await redis.get(`scrub:settings:${key}`)
+      const settings = settingsRaw ? JSON.parse(settingsRaw as string) : {}
+      const includeDnc = settings.includeDnc || false
+
       // Filter and categorize results
-      const scrubbed = filterResults(result.DATA || [])
+      const scrubbed = filterResults(result.DATA || [], { includeDnc })
 
       // Save all results to our internal caches
       // This prevents us from paying to re-check them in future campaigns

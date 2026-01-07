@@ -337,6 +337,7 @@ function NewCampaignPageContent() {
       setMessageB(draft.messageB || '')
       setIsABTest(draft.isABTest || false)
       setSkipDedup(draft.skipDedup || false)
+      setIncludeDnc(draft.includeDnc || false)
       setFollowUpEnabled(draft.followUpEnabled || false)
       setFollowUpDays(draft.followUpDays || 3)
       setFollowUpMessage(draft.followUpMessage || '')
@@ -371,6 +372,7 @@ function NewCampaignPageContent() {
           messageB,
           isABTest,
           skipDedup,
+          includeDnc,
           followUpEnabled,
           followUpDays,
           followUpMessage,

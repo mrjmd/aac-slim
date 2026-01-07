@@ -27,6 +27,7 @@ export interface CampaignDraft {
   messageB?: string
   isABTest: boolean
   skipDedup: boolean
+  includeDnc: boolean
   followUpEnabled: boolean
   followUpDays?: number
   followUpMessage?: string
@@ -100,6 +101,7 @@ export async function POST(request: Request) {
       messageB: body.messageB,
       isABTest: body.isABTest || false,
       skipDedup: body.skipDedup || false,
+      includeDnc: body.includeDnc || false,
       followUpEnabled: body.followUpEnabled || false,
       followUpDays: body.followUpDays,
       followUpMessage: body.followUpMessage,

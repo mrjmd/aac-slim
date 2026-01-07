@@ -65,16 +65,21 @@ export async function POST(request: NextRequest) {
         let afterSuppression: Array<{ id: string; phone: string }> = []
         let verifiedCleanPhones: Array<{ id: string; phone: string }> = []
 
+        // Track DNC phones separately - they're cached but may be included based on settings
+        let cachedDncPhones: Array<{ id: string; phone: string }> = []
+
         for (const phone of validPhones) {
           const suppressedReason = cacheResults.suppressed.get(phone.phone)
           if (suppressedReason) {
-            // When includeDnc is enabled, treat cached DNC phones as verified clean (skip SearchBug)
-            if (suppressedReason === 'dnc' && body.includeDnc) {
-              verifiedCleanPhones.push(phone)
+            // DNC phones are cached - never re-send to SearchBug
+            // But track them separately so includeDnc toggle can include them later
+            if (suppressedReason === 'dnc') {
+              cachedDncPhones.push(phone)
+              removed.dnc++
               continue
             }
+            // Other suppression reasons - always filter
             if (suppressedReason === 'optout') removed.optout++
-            else if (suppressedReason === 'dnc') removed.dnc++
             else if (suppressedReason === 'litigator') removed.litigator++
             else if (suppressedReason === 'landline') removed.landline++
             else if (suppressedReason === 'inactive') removed.inactive++
@@ -84,6 +89,13 @@ export async function POST(request: NextRequest) {
           } else {
             afterSuppression.push(phone)
           }
+        }
+
+        // If includeDnc is enabled, add cached DNC phones to verified clean list
+        if (body.includeDnc && cachedDncPhones.length > 0) {
+          verifiedCleanPhones.push(...cachedDncPhones)
+          // Adjust the removed count since we're including them
+          removed.dnc = 0
         }
 
         const totalSuppressed = removed.optout + removed.dnc + removed.litigator + removed.landline + removed.inactive

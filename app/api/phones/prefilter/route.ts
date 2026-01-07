@@ -68,9 +68,9 @@ export async function POST(request: NextRequest) {
         for (const phone of validPhones) {
           const suppressedReason = cacheResults.suppressed.get(phone.phone)
           if (suppressedReason) {
-            // Skip DNC filtering if includeDnc is enabled
+            // When includeDnc is enabled, treat cached DNC phones as verified clean (skip SearchBug)
             if (suppressedReason === 'dnc' && body.includeDnc) {
-              afterSuppression.push(phone)
+              verifiedCleanPhones.push(phone)
               continue
             }
             if (suppressedReason === 'optout') removed.optout++

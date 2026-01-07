@@ -610,9 +610,9 @@ function NewCampaignPageContent() {
       // All remaining phones are already verified clean - skip SearchBug!
       if (preFilteredResult.preFilteredPhones.length === 0 && cachedClean.length > 0) {
         setScrubProgress('All phones verified from cache - skipping SearchBug!')
-        const cachedCleanSet = new Set(cachedClean.map(c => c.phone))
-        // Note: cachedClean phones have no plus sign, parsedContacts do
-        const cleanContactList = parsedContacts.filter(c => cachedCleanSet.has(c.phone.replace('+', '')))
+        // Normalize cached phones to 10 digits for matching
+        const cachedCleanSet = new Set(cachedClean.map(c => c.phone.replace(/^\+?1?/, '')))
+        const cleanContactList = parsedContacts.filter(c => cachedCleanSet.has(c.phone.replace(/^\+?1?/, '')))
 
         setScrubResult({
           status: 'complete',
@@ -719,10 +719,10 @@ function NewCampaignPageContent() {
           })
 
           // Build clean contact list from both sources
+          // SearchBug returns 10-digit phones, parsedContacts have +1 prefix
           const cleanContactList = parsedContacts.filter(c => {
-            const phoneNormalized = c.phone.replace('+1', '').replace('+', '')
-            const phoneWithoutPlus = c.phone.replace('+', '')
-            return searchBugCleanPhones.has(phoneNormalized) || cachedCleanSet.has(phoneWithoutPlus)
+            const phone10 = c.phone.replace(/^\+?1?/, '') // Strip +1 or 1 prefix to get 10 digits
+            return searchBugCleanPhones.has(phone10) || cachedCleanSet.has(phone10)
           })
           setCleanContacts(cleanContactList)
           setScrubProgress('')

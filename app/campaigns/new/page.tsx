@@ -718,7 +718,8 @@ function NewCampaignPageContent() {
           // Build clean contact list from both sources
           const cleanContactList = parsedContacts.filter(c => {
             const phoneNormalized = c.phone.replace('+1', '').replace('+', '')
-            return searchBugCleanPhones.has(phoneNormalized) || cachedCleanSet.has(c.phone)
+            const phoneWithoutPlus = c.phone.replace('+', '')
+            return searchBugCleanPhones.has(phoneNormalized) || cachedCleanSet.has(phoneWithoutPlus)
           })
           setCleanContacts(cleanContactList)
           setScrubProgress('')

@@ -50,11 +50,12 @@ export async function POST(request: NextRequest) {
         }
 
         // PHASE 1: Check all caches (suppression lists + verified clean/inactive)
+        console.log('Prefilter received includeDnc:', body.includeDnc)
         send('progress', {
           phase: 1,
           total: 4,
           message: 'Checking caches...',
-          detail: `Checking ${validPhones.length} phones against suppression lists and verification cache`,
+          detail: `Checking ${validPhones.length} phones against suppression lists and verification cache${body.includeDnc ? ' (DNC included)' : ''}`,
         })
 
         const phoneNumbers = validPhones.map(p => p.phone)

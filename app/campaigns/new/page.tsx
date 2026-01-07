@@ -609,7 +609,8 @@ function NewCampaignPageContent() {
       if (preFilteredResult.preFilteredPhones.length === 0 && cachedClean.length > 0) {
         setScrubProgress('All phones verified from cache - skipping SearchBug!')
         const cachedCleanSet = new Set(cachedClean.map(c => c.phone))
-        const cleanContactList = parsedContacts.filter(c => cachedCleanSet.has(c.phone))
+        // Note: cachedClean phones have no plus sign, parsedContacts do
+        const cleanContactList = parsedContacts.filter(c => cachedCleanSet.has(c.phone.replace('+', '')))
 
         setScrubResult({
           status: 'complete',

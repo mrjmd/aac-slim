@@ -34,7 +34,7 @@ interface BatchRequest {
   campaignId: string
   optOutFooter: string
   throttleSeconds: number
-  skipDedup: boolean
+  // skipDedup removed - dedup is now done only in prefilter
 }
 
 function personalizeMessage(template: string, contact: NormalizedContact): string {
@@ -99,7 +99,8 @@ async function handler(request: Request) {
     const qstash = getQstash()
 
     const body: BatchRequest = await request.json()
-    const { campaignId, optOutFooter, throttleSeconds, skipDedup } = body
+    const { campaignId, optOutFooter, throttleSeconds } = body
+    // skipDedup removed - dedup is now done only in prefilter
 
     // Get campaign data
     const campaignRaw = await redis.get(`campaign:${campaignId}`) as string | null

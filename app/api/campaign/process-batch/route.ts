@@ -188,16 +188,9 @@ async function handler(request: Request) {
     let pipedriveCreated = 0
 
     for (const contact of batch) {
-      // Dedup check
-      if (!skipDedup) {
-        const hasConversation = await hasExistingConversation(contact.phone)
-        if (hasConversation) {
-          skipped++
-          // Increment skipped stat
-          campaign.stats.skipped = (campaign.stats.skipped || 0) + 1
-          continue
-        }
-      }
+      // Dedup check REMOVED - this is now done in prefilter only
+      // Having it here caused inconsistency where contacts passed prefilter but got skipped here
+      // The old code also used /conversations endpoint instead of /messages which gave different results
 
       // Select variant if A/B test
       let messageTemplate = campaign.messageTemplate

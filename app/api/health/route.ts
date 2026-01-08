@@ -1,6 +1,9 @@
 import { NextResponse } from 'next/server'
 import { Redis } from '@upstash/redis'
 
+// Version for deployment verification
+const CODE_VERSION = 'v2026-01-08-fix-skipped'
+
 // Force dynamic rendering
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
@@ -150,11 +153,11 @@ export async function GET() {
       }
     }
 
-    return NextResponse.json(metrics)
+    return NextResponse.json({ ...metrics, codeVersion: CODE_VERSION })
   } catch (error) {
     console.error('Health check error:', error)
     return NextResponse.json(
-      { error: 'Failed to fetch health metrics' },
+      { error: 'Failed to fetch health metrics', codeVersion: CODE_VERSION },
       { status: 500 }
     )
   }

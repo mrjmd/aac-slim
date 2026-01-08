@@ -63,10 +63,18 @@ async function sendMessage(from: string, to: string, text: string) {
   return { id: data.data?.id || 'unknown' }
 }
 
+// Normalize phone to 10 digits for consistent cache lookups
+function normalizePhone(phone: string): string {
+  const digits = phone.replace(/\D/g, '')
+  return digits.slice(-10)
+}
+
 // Check if phone is opted out
 async function isOptedOut(phone: string): Promise<boolean> {
   const redis = getRedis()
-  return await redis.sismember('optouts', phone)
+  const normalized = normalizePhone(phone)
+  // Check the correct key that matches suppression.ts
+  return await redis.sismember('optouts:phones', normalized)
 }
 
 // Get campaign
@@ -140,8 +148,14 @@ async function handler(request: Request) {
     }
 
     // Check opt-out list
-    if (await isOptedOut(payload.phone)) {
-      console.log('Skipping opted-out phone', { phone: payload.phone })
+    const optedOut = await isOptedOut(payload.phone)
+    console.log('[SEND v2] Opt-out check', {
+      phone: payload.phone,
+      normalized: normalizePhone(payload.phone),
+      optedOut
+    })
+    if (optedOut) {
+      console.log('[SEND v2] Skipping opted-out phone', { phone: payload.phone })
       await incrementStats(payload.campaignId, 'skipped')
       return NextResponse.json({ success: true, skipped: true, reason: 'opted-out' })
     }

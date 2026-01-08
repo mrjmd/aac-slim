@@ -386,6 +386,7 @@ export async function POST(request: Request) {
 
     // Parse CSV
     const { contacts, stats: parseStats } = parseCSV(csvData)
+    console.log(`[CAMPAIGN CREATE v2] Parsed CSV: ${contacts.length} contacts, parseStats:`, JSON.stringify(parseStats))
     if (contacts.length === 0) {
       return NextResponse.json({ error: 'No valid contacts found in CSV', parseStats }, { status: 400 })
     }
@@ -543,7 +544,7 @@ export async function POST(request: Request) {
       }
     }
 
-    return NextResponse.json({
+    const response = {
       success: true,
       dryRun: !!dryRun,
       ...results,
@@ -551,7 +552,9 @@ export async function POST(request: Request) {
       scheduledAt: scheduledAt || null,
       estimatedMinutes: Math.ceil((results.queued * throttleSeconds) / 60),
       estimatedTotalDays: isMultiDay ? totalDays : 1,
-    })
+    }
+    console.log(`[CAMPAIGN CREATE v2] FINAL RESPONSE:`, JSON.stringify(response, null, 2))
+    return NextResponse.json(response)
   } catch (error) {
     console.error('Campaign create error:', error)
     // Ensure we return a proper error message string

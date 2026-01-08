@@ -287,13 +287,18 @@ async function createPipedriveContact(contact: NormalizedContact, campaignName: 
   const domain = process.env.PIPEDRIVE_COMPANY_DOMAIN
 
   if (!apiKey || !domain) {
-    throw new Error('Pipedrive credentials not configured')
+    throw new Error(`Pipedrive credentials not configured: apiKey=${!!apiKey}, domain=${!!domain}`)
   }
 
   // Search for existing
-  const searchRes = await fetch(
-    `https://${domain}.pipedrive.com/api/v1/persons/search?term=${encodeURIComponent(contact.phone)}&fields=phone&api_token=${apiKey}`
-  )
+  let searchRes: Response
+  try {
+    searchRes = await fetch(
+      `https://${domain}.pipedrive.com/api/v1/persons/search?term=${encodeURIComponent(contact.phone)}&fields=phone&api_token=${apiKey}`
+    )
+  } catch (fetchError) {
+    throw new Error(`Pipedrive search fetch failed: ${(fetchError as Error).message}`)
+  }
 
   if (!searchRes.ok) {
     const errorText = await searchRes.text()
@@ -307,21 +312,26 @@ async function createPipedriveContact(contact: NormalizedContact, campaignName: 
   }
 
   // Create new
-  const createRes = await fetch(
-    `https://${domain}.pipedrive.com/api/v1/persons?api_token=${apiKey}`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        name: `${contact.firstName} ${contact.lastName || ''}`.trim(),
-        phone: [{ value: contact.phone, primary: true, label: 'mobile' }],
-        email: contact.email ? [{ value: contact.email, primary: true, label: 'work' }] : undefined,
-        visible_to: 3,
-        // Custom field for lead source
-        '9c5cc1715fdd7b997dbd81a09c75f2c399f29dee': `Campaign: ${campaignName}`,
-      }),
-    }
-  )
+  let createRes: Response
+  try {
+    createRes = await fetch(
+      `https://${domain}.pipedrive.com/api/v1/persons?api_token=${apiKey}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: `${contact.firstName} ${contact.lastName || ''}`.trim(),
+          phone: [{ value: contact.phone, primary: true, label: 'mobile' }],
+          email: contact.email ? [{ value: contact.email, primary: true, label: 'work' }] : undefined,
+          visible_to: 3,
+          // Custom field for lead source
+          '9c5cc1715fdd7b997dbd81a09c75f2c399f29dee': `Campaign: ${campaignName}`,
+        }),
+      }
+    )
+  } catch (fetchError) {
+    throw new Error(`Pipedrive create fetch failed: ${(fetchError as Error).message}`)
+  }
 
   if (!createRes.ok) {
     const errorText = await createRes.text()
@@ -503,17 +513,21 @@ export async function POST(request: Request) {
       // Queue message via QStash with configurable throttle
       // Add base delay for scheduled campaigns
       const delay = baseDelay + Math.floor(queueIndex * throttleSeconds)
-      await qstash.publishJSON({
-        url: callbackUrl,
-        delay,
-        body: {
-          campaignId,
-          pipedrivePersonId: personId,
-          phone: contact.phone,
-          message: personalizedMessage,
-          variant: variantId,
-        },
-      })
+      try {
+        await qstash.publishJSON({
+          url: callbackUrl,
+          delay,
+          body: {
+            campaignId,
+            pipedrivePersonId: personId,
+            phone: contact.phone,
+            message: personalizedMessage,
+            variant: variantId,
+          },
+        })
+      } catch (qstashError) {
+        throw new Error(`QStash publish failed: ${(qstashError as Error).message}`)
+      }
       await incrementStats(redis, campaignId, { queued: 1 })
 
       // Track recipient for follow-up processing

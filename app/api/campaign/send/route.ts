@@ -148,17 +148,19 @@ async function handler(request: Request) {
     }
 
     // Check opt-out list
+    // TEMPORARILY DISABLED FOR DEBUGGING - TODO: re-enable after fixing
     const optedOut = await isOptedOut(payload.phone)
-    console.log('[SEND v2] Opt-out check', {
+    console.log('[SEND v3] Opt-out check DISABLED FOR DEBUG', {
       phone: payload.phone,
       normalized: normalizePhone(payload.phone),
-      optedOut
+      optedOut,
+      wouldSkip: optedOut
     })
-    if (optedOut) {
-      console.log('[SEND v2] Skipping opted-out phone', { phone: payload.phone })
-      await incrementStats(payload.campaignId, 'skipped')
-      return NextResponse.json({ success: true, skipped: true, reason: 'opted-out' })
-    }
+    // if (optedOut) {
+    //   console.log('[SEND v3] Skipping opted-out phone', { phone: payload.phone })
+    //   await incrementStats(payload.campaignId, 'skipped')
+    //   return NextResponse.json({ success: true, skipped: true, reason: 'opted-out' })
+    // }
 
     // Send the message
     try {

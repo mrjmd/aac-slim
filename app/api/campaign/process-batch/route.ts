@@ -45,21 +45,7 @@ function personalizeMessage(template: string, contact: NormalizedContact): strin
     .replace(/\{neighborhood\}/g, contact.subdivision || contact.city)
 }
 
-async function hasExistingConversation(phone: string): Promise<boolean> {
-  const apiKey = process.env.QUO_API_KEY
-  if (!apiKey) return false
-  try {
-    const res = await fetch(
-      `https://api.openphone.com/v1/conversations?participants=${encodeURIComponent(phone)}&maxResults=1`,
-      { headers: { Authorization: apiKey } }
-    )
-    if (!res.ok) return false
-    const data = await res.json()
-    return data.data && data.data.length > 0
-  } catch {
-    return false
-  }
-}
+// hasExistingConversation removed - dedup is now done only in prefilter
 
 async function createPipedriveContact(contact: NormalizedContact, campaignName: string): Promise<{ id: number; created: boolean }> {
   const apiKey = process.env.PIPEDRIVE_API_KEY

@@ -30,13 +30,24 @@ const INACTIVE_CACHE_DAYS = 90
 const CLEAN_CACHE_DAYS = 60
 
 /**
+ * Normalize phone to 10 digits for consistent cache keys
+ * Handles: +14155551234, 14155551234, 4155551234 -> 4155551234
+ */
+function normalizePhone(phone: string): string {
+  // Remove all non-digits
+  const digits = phone.replace(/\D/g, '')
+  // Take last 10 digits (handles +1, 1, or no prefix)
+  return digits.slice(-10)
+}
+
+/**
  * Add multiple phones to the DNC list
  */
 export async function addManyToDncList(phones: string[]): Promise<void> {
   if (phones.length === 0) return
   const redis = getRedis()
   for (const phone of phones) {
-    await redis.sadd(KEYS.dncPhones, phone)
+    await redis.sadd(KEYS.dncPhones, normalizePhone(phone))
   }
   console.log(`Added ${phones.length} phones to DNC list`)
 }
@@ -48,7 +59,7 @@ export async function addManyToLitigatorList(phones: string[]): Promise<void> {
   if (phones.length === 0) return
   const redis = getRedis()
   for (const phone of phones) {
-    await redis.sadd(KEYS.litigatorPhones, phone)
+    await redis.sadd(KEYS.litigatorPhones, normalizePhone(phone))
   }
   console.log(`Added ${phones.length} phones to litigator list`)
 }
@@ -60,7 +71,7 @@ export async function addManyToLandlineList(phones: string[]): Promise<void> {
   if (phones.length === 0) return
   const redis = getRedis()
   for (const phone of phones) {
-    await redis.sadd(KEYS.landlinePhones, phone)
+    await redis.sadd(KEYS.landlinePhones, normalizePhone(phone))
   }
   console.log(`Added ${phones.length} phones to landline list`)
 }
@@ -73,7 +84,7 @@ export async function addManyToInactiveList(phones: string[]): Promise<void> {
   const redis = getRedis()
   const timestamp = Date.now().toString()
   for (const phone of phones) {
-    await redis.hset(KEYS.inactivePhones, { [phone]: timestamp })
+    await redis.hset(KEYS.inactivePhones, { [normalizePhone(phone)]: timestamp })
   }
   console.log(`Added ${phones.length} phones to inactive cache`)
 }
@@ -86,7 +97,7 @@ export async function addManyToVerifiedClean(phones: string[]): Promise<void> {
   const redis = getRedis()
   const timestamp = Date.now().toString()
   for (const phone of phones) {
-    await redis.hset(KEYS.verifiedClean, { [phone]: timestamp })
+    await redis.hset(KEYS.verifiedClean, { [normalizePhone(phone)]: timestamp })
   }
   console.log(`Added ${phones.length} phones to verified clean cache`)
 }
@@ -143,6 +154,7 @@ export async function isVerifiedCleanRecent(phone: string): Promise<boolean> {
 /**
  * Batch check phones against all caches
  * Returns categorized results for efficient pre-filtering
+ * NOTE: Returns results keyed by ORIGINAL phone format, but checks using normalized 10-digit format
  */
 export async function batchCheckCache(phones: string[]): Promise<{
   suppressed: Map<string, 'optout' | 'dnc' | 'litigator' | 'landline' | 'inactive'>
@@ -159,14 +171,18 @@ export async function batchCheckCache(phones: string[]): Promise<{
   const cleanMaxAge = CLEAN_CACHE_DAYS * 24 * 60 * 60 * 1000
 
   for (const phone of phones) {
-    // Check permanent suppression lists
+    // Normalize to 10 digits for cache lookup
+    const normalized = normalizePhone(phone)
+
+    // Check permanent suppression lists using normalized phone
     const [isOptOut, isDnc, isLit, isLandline] = await Promise.all([
-      redis.sismember(KEYS.optOutPhones, phone),
-      redis.sismember(KEYS.dncPhones, phone),
-      redis.sismember(KEYS.litigatorPhones, phone),
-      redis.sismember(KEYS.landlinePhones, phone),
+      redis.sismember(KEYS.optOutPhones, normalized),
+      redis.sismember(KEYS.dncPhones, normalized),
+      redis.sismember(KEYS.litigatorPhones, normalized),
+      redis.sismember(KEYS.landlinePhones, normalized),
     ])
 
+    // Return results keyed by original phone format for caller convenience
     if (isLit === 1) {
       suppressed.set(phone, 'litigator')
       continue
@@ -184,10 +200,10 @@ export async function batchCheckCache(phones: string[]): Promise<{
       continue
     }
 
-    // Check time-limited caches
+    // Check time-limited caches using normalized phone
     const [inactiveTs, cleanTs] = await Promise.all([
-      redis.hget(KEYS.inactivePhones, phone),
-      redis.hget(KEYS.verifiedClean, phone),
+      redis.hget(KEYS.inactivePhones, normalized),
+      redis.hget(KEYS.verifiedClean, normalized),
     ])
 
     if (inactiveTs) {
@@ -240,7 +256,7 @@ export async function addManyToEverMessaged(phones: string[]): Promise<void> {
   if (phones.length === 0) return
   const redis = getRedis()
   for (const phone of phones) {
-    await redis.sadd(KEYS.everMessaged, phone)
+    await redis.sadd(KEYS.everMessaged, normalizePhone(phone))
   }
   console.log(`Added ${phones.length} phones to ever-messaged list`)
 }
@@ -262,7 +278,8 @@ export async function checkManyEverMessaged(phones: string[]): Promise<Set<strin
   const messaged = new Set<string>()
 
   for (const phone of phones) {
-    const isMember = await redis.sismember(KEYS.everMessaged, phone)
+    // Check using normalized phone, but return original format
+    const isMember = await redis.sismember(KEYS.everMessaged, normalizePhone(phone))
     if (isMember === 1) {
       messaged.add(phone)
     }

@@ -138,6 +138,7 @@ export async function POST(request: NextRequest) {
 
         // PHASE 3: OpenPhone check
         let afterOpenPhone = afterEverMessaged
+        let openPhoneErrors = 0
         if (!body.skipOpenPhoneCheck && afterEverMessaged.length > 0) {
           send('progress', {
             phase: 3,
@@ -150,6 +151,7 @@ export async function POST(request: NextRequest) {
             const phonesToCheck = afterEverMessaged.map(p => p.phone)
             let checked = 0
             const hasConversation = new Set<string>()
+            let totalErrors = 0
 
             // Check in small batches and report progress
             const batchSize = 10
@@ -160,21 +162,25 @@ export async function POST(request: NextRequest) {
                 delayMs: 300,
               })
 
-              for (const phone of batchResults) {
+              for (const phone of batchResults.hasConversation) {
                 hasConversation.add(phone)
               }
+              totalErrors += batchResults.errorCount
 
               checked += batch.length
+              const errorWarning = totalErrors > 0 ? ` (${totalErrors} API errors!)` : ''
               send('progress', {
                 phase: 3,
                 total: 4,
-                message: `Checking OpenPhone history... ${checked}/${phonesToCheck.length}`,
+                message: `Checking OpenPhone history... ${checked}/${phonesToCheck.length}${errorWarning}`,
                 detail: `Found ${hasConversation.size} with existing conversations`,
                 checked,
                 totalToCheck: phonesToCheck.length,
+                errorCount: totalErrors,
               })
             }
 
+            openPhoneErrors = totalErrors
             afterOpenPhone = []
             for (const phone of afterEverMessaged) {
               if (hasConversation.has(phone.phone)) {
@@ -184,12 +190,16 @@ export async function POST(request: NextRequest) {
               }
             }
 
+            const errorMsg = totalErrors > 0
+              ? ` WARNING: ${totalErrors} phones had API errors and were NOT checked!`
+              : ''
             send('progress', {
               phase: 3,
               total: 4,
-              message: 'OpenPhone check complete',
-              detail: `Removed ${removed.openphoneHistory} with existing conversations`,
+              message: totalErrors > 0 ? 'OpenPhone check complete (with errors!)' : 'OpenPhone check complete',
+              detail: `Removed ${removed.openphoneHistory} with existing conversations.${errorMsg}`,
               remaining: afterOpenPhone.length,
+              errorCount: totalErrors,
             })
           } catch (error) {
             send('progress', {
@@ -224,7 +234,9 @@ export async function POST(request: NextRequest) {
         send('complete', {
           phase: 4,
           total: 4,
-          message: 'Pre-filtering complete',
+          message: openPhoneErrors > 0
+            ? `Pre-filtering complete (WARNING: ${openPhoneErrors} OpenPhone API errors!)`
+            : 'Pre-filtering complete',
           preFilterStats,
           // Phones that need SearchBug validation
           preFilteredPhones: afterOpenPhone,
@@ -233,6 +245,8 @@ export async function POST(request: NextRequest) {
           totalRemoved,
           // Pass through settings for scrub
           includeDnc: body.includeDnc || false,
+          // Track OpenPhone API errors so UI can warn user
+          openPhoneErrors,
         })
 
         controller.close()

@@ -2,6 +2,9 @@ import { NextResponse } from 'next/server'
 import { parse } from 'csv-parse/sync'
 import { Redis } from '@upstash/redis'
 import { Client } from '@upstash/qstash'
+// Note: OpenPhone dedup check removed from here - it's done in prefilter
+// Having it in both places caused inconsistent behavior (phones pass prefilter
+// but get skipped here if the API was flaky during prefilter)
 
 // Force dynamic rendering
 export const dynamic = 'force-dynamic'
@@ -231,9 +234,10 @@ function calculateNextBatchTime(startHour: number, skipWeekends: boolean): Date 
 
 async function incrementStats(redis: Redis, campaignId: string, updates: Record<string, number>) {
   const key = `campaign:${campaignId}`
-  const raw = await redis.get(key) as string | null
+  const raw = await redis.get(key)
   if (!raw) return
-  const campaign = JSON.parse(raw)
+  // Handle both string and auto-parsed object from Upstash
+  const campaign = typeof raw === 'string' ? JSON.parse(raw) : raw
   for (const [field, delta] of Object.entries(updates)) {
     campaign.stats[field] = (campaign.stats[field] || 0) + delta
   }
@@ -242,9 +246,10 @@ async function incrementStats(redis: Redis, campaignId: string, updates: Record<
 
 async function updateStatus(redis: Redis, campaignId: string, status: string) {
   const key = `campaign:${campaignId}`
-  const raw = await redis.get(key) as string | null
+  const raw = await redis.get(key)
   if (!raw) return
-  const campaign = JSON.parse(raw)
+  // Handle both string and auto-parsed object from Upstash
+  const campaign = typeof raw === 'string' ? JSON.parse(raw) : raw
   campaign.status = status
   await redis.set(key, JSON.stringify(campaign))
 }
@@ -277,31 +282,24 @@ async function trackRecipient(
 // External API calls
 // ============================================
 
-async function hasExistingConversation(phone: string): Promise<boolean> {
-  const apiKey = process.env.QUO_API_KEY
-  if (!apiKey) return false
-
-  try {
-    const res = await fetch(
-      `https://api.openphone.com/v1/conversations?participants=${encodeURIComponent(phone)}&maxResults=1`,
-      { headers: { Authorization: apiKey } }
-    )
-    if (!res.ok) return false
-    const data = await res.json()
-    return data.data && data.data.length > 0
-  } catch {
-    return false
-  }
-}
-
 async function createPipedriveContact(contact: NormalizedContact, campaignName: string): Promise<{ id: number; created: boolean }> {
   const apiKey = process.env.PIPEDRIVE_API_KEY
   const domain = process.env.PIPEDRIVE_COMPANY_DOMAIN
+
+  if (!apiKey || !domain) {
+    throw new Error('Pipedrive credentials not configured')
+  }
 
   // Search for existing
   const searchRes = await fetch(
     `https://${domain}.pipedrive.com/api/v1/persons/search?term=${encodeURIComponent(contact.phone)}&fields=phone&api_token=${apiKey}`
   )
+
+  if (!searchRes.ok) {
+    const errorText = await searchRes.text()
+    throw new Error(`Pipedrive search failed: ${searchRes.status} - ${errorText}`)
+  }
+
   const searchData = await searchRes.json()
 
   if (searchData.data?.items?.length > 0) {
@@ -324,7 +322,18 @@ async function createPipedriveContact(contact: NormalizedContact, campaignName: 
       }),
     }
   )
+
+  if (!createRes.ok) {
+    const errorText = await createRes.text()
+    throw new Error(`Pipedrive create failed: ${createRes.status} - ${errorText}`)
+  }
+
   const createData = await createRes.json()
+
+  if (!createData.data?.id) {
+    throw new Error(`Pipedrive create returned invalid response: ${JSON.stringify(createData)}`)
+  }
+
   return { id: createData.data.id, created: true }
 }
 
@@ -339,8 +348,9 @@ export async function POST(request: Request) {
 
     // Fetch global settings
     const settingsData = await redis.get('settings:global')
+    // Handle both string and auto-parsed object from Upstash
     const settings = settingsData
-      ? typeof settingsData === 'string' ? JSON.parse(settingsData) : settingsData
+      ? (typeof settingsData === 'string' ? JSON.parse(settingsData) : settingsData)
       : { campaign: { optOutFooter: 'Reply STOP to opt out', throttleSeconds: 45, dailySendLimit: 125, skipWeekends: true, defaultStartHour: 9 } }
     const optOutFooter = settings.campaign?.optOutFooter || ''
     const throttleSeconds = settings.campaign?.throttleSeconds || 45
@@ -442,18 +452,13 @@ export async function POST(request: Request) {
     let queueIndex = 0
 
     // Process only the current batch (first day's contacts)
+    // Note: OpenPhone dedup check was removed - it's now done ONLY in prefilter
+    // This prevents the "2 clean but 2 skipped" inconsistency where phones pass
+    // prefilter but get caught here due to API flakiness during prefilter
+    console.log(`[CAMPAIGN CREATE v2] Processing ${batchContacts.length} contacts, dryRun=${dryRun}, skipDedup=${skipDedup}`)
     for (const contact of batchContacts) {
       results.processed++
-
-      // Dedup check
-      if (!skipDedup && !dryRun) {
-        const hasConversation = await hasExistingConversation(contact.phone)
-        if (hasConversation) {
-          results.skipped++
-          await incrementStats(redis, campaignId, { skipped: 1 })
-          continue
-        }
-      }
+      console.log(`[CAMPAIGN CREATE v2] Processing contact ${results.processed}: ${contact.phone}`)
 
       // Select variant
       let messageTemplate: string
@@ -549,6 +554,15 @@ export async function POST(request: Request) {
     })
   } catch (error) {
     console.error('Campaign create error:', error)
-    return NextResponse.json({ error: (error as Error).message }, { status: 500 })
+    // Ensure we return a proper error message string
+    let errorMessage = 'Unknown error occurred'
+    if (error instanceof Error) {
+      errorMessage = error.message
+    } else if (typeof error === 'string') {
+      errorMessage = error
+    } else if (error && typeof error === 'object') {
+      errorMessage = JSON.stringify(error)
+    }
+    return NextResponse.json({ error: errorMessage }, { status: 500 })
   }
 }

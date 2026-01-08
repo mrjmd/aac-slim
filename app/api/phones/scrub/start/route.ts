@@ -64,8 +64,17 @@ export async function POST(request: Request) {
     // If we have pre-filtered phones from a previous run, skip straight to SearchBug
     if (body.preFilteredPhones && body.preFilteredPhones.length > 0) {
       console.log(`Using ${body.preFilteredPhones.length} pre-filtered phones (skipping OpenPhone check)`)
+      console.log(`includeDnc setting: ${body.includeDnc}`)
 
       const { key, estimatedMinutes } = await submitPhoneBatch(body.preFilteredPhones)
+
+      // Store includeDnc setting with the key (expires in 1 hour)
+      // CRITICAL: This must happen for status route to respect the setting
+      if (body.includeDnc) {
+        const redis = getRedis()
+        await redis.set(`scrub:settings:${key}`, JSON.stringify({ includeDnc: true }), { ex: 3600 })
+        console.log(`Stored includeDnc=true for key ${key}`)
+      }
 
       return NextResponse.json({
         success: true,
@@ -144,14 +153,18 @@ export async function POST(request: Request) {
     if (!body.skipOpenPhoneCheck && afterEverMessaged.length > 0) {
       try {
         const phonesToCheck = afterEverMessaged.map(p => p.phone)
-        const hasConversation = await checkManyConversations(phonesToCheck, {
+        const result = await checkManyConversations(phonesToCheck, {
           concurrency: 2,  // Very conservative to avoid rate limits
           delayMs: 500,    // 500ms between batches
         })
 
+        if (result.errorCount > 0) {
+          console.warn(`OpenPhone check had ${result.errorCount} API errors`)
+        }
+
         afterOpenPhone = []
         for (const phone of afterEverMessaged) {
-          if (hasConversation.has(phone.phone)) {
+          if (result.hasConversation.has(phone.phone)) {
             removed.openphoneHistory++
           } else {
             afterOpenPhone.push(phone)

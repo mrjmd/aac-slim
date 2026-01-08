@@ -507,7 +507,7 @@ function NewCampaignPageContent() {
       // If we have cached pre-filtered phones, skip to SearchBug
       if (preFilteredPhones) {
         setScrubProgress('Retrying SearchBug (using cached pre-filter)...')
-        await submitToSearchBug(preFilteredPhones, preFilterStats)
+        await submitToSearchBug(preFilteredPhones, preFilterStats, includeDnc)
         return
       }
 
@@ -610,9 +610,10 @@ function NewCampaignPageContent() {
       // All remaining phones are already verified clean - skip SearchBug!
       if (preFilteredResult.preFilteredPhones.length === 0 && cachedClean.length > 0) {
         setScrubProgress('All phones verified from cache - skipping SearchBug!')
-        // Normalize cached phones to 10 digits for matching
-        const cachedCleanSet = new Set(cachedClean.map(c => c.phone.replace(/^\+?1?/, '')))
-        const cleanContactList = parsedContacts.filter(c => cachedCleanSet.has(c.phone.replace(/^\+?1?/, '')))
+        // Normalize all phones to 10 digits for consistent matching
+        const normalize = (p: string) => p.replace(/\D/g, '').slice(-10)
+        const cachedCleanSet = new Set(cachedClean.map(c => normalize(c.phone)))
+        const cleanContactList = parsedContacts.filter(c => cachedCleanSet.has(normalize(c.phone)))
 
         setScrubResult({
           status: 'complete',
@@ -640,7 +641,8 @@ function NewCampaignPageContent() {
       }
 
       // PHASE 4: Submit to SearchBug (only phones not in cache)
-      await submitToSearchBug(preFilteredResult.preFilteredPhones, preFilteredResult.preFilterStats, preFilteredResult.includeDnc)
+      // Always use includeDnc from state, not from preFilteredResult
+      await submitToSearchBug(preFilteredResult.preFilteredPhones, preFilteredResult.preFilterStats, includeDnc)
 
     } catch (err) {
       setError((err as Error).message)
@@ -702,8 +704,10 @@ function NewCampaignPageContent() {
           clearInterval(pollInterval)
 
           // Combine SearchBug clean phones + cached clean phones
-          const searchBugCleanPhones = new Set(data.clean.map((c: CleanContact) => c.phone))
-          const cachedCleanSet = new Set((cachedCleanPhones || []).map(c => c.phone))
+          // Normalize all to 10 digits for consistent matching
+          const normalize = (p: string) => p.replace(/\D/g, '').slice(-10)
+          const searchBugCleanPhones = new Set(data.clean.map((c: CleanContact) => normalize(c.phone)))
+          const cachedCleanSet = new Set((cachedCleanPhones || []).map(c => normalize(c.phone)))
 
           // Add cached phones to the summary
           const totalClean = data.summary.clean + (cachedCleanPhones?.length || 0)
@@ -719,9 +723,9 @@ function NewCampaignPageContent() {
           })
 
           // Build clean contact list from both sources
-          // SearchBug returns 10-digit phones, parsedContacts have +1 prefix
+          // Use same normalize function for consistent matching
           const cleanContactList = parsedContacts.filter(c => {
-            const phone10 = c.phone.replace(/^\+?1?/, '') // Strip +1 or 1 prefix to get 10 digits
+            const phone10 = normalize(c.phone)
             return searchBugCleanPhones.has(phone10) || cachedCleanSet.has(phone10)
           })
           setCleanContacts(cleanContactList)

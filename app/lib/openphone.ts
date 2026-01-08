@@ -106,14 +106,19 @@ function ensureE164(phone: string): string {
   return `+${phone}`
 }
 
+export interface ConversationCheckResult {
+  hasConversation: boolean
+  error?: string
+}
+
 /**
  * Check if we have any existing conversation history with a phone number
  * Used for deduplication - to avoid re-contacting people we've already messaged
  * @param phone - Phone number to check (will be normalized to E.164)
  * @param retries - Number of retries on rate limit (default 3)
- * @returns true if any messages exist (inbound or outbound), false otherwise
+ * @returns Object with hasConversation boolean and optional error string
  */
-export async function hasExistingConversation(phone: string, retries: number = 3): Promise<boolean> {
+export async function hasExistingConversation(phone: string, retries: number = 3): Promise<ConversationCheckResult> {
   try {
     const phoneNumberId = await getPhoneNumberId()
     const e164Phone = ensureE164(phone)
@@ -130,7 +135,7 @@ export async function hasExistingConversation(phone: string, retries: number = 3
 
     const hasMessages = (result.totalItems ?? 0) > 0 || (result.data?.length ?? 0) > 0
 
-    return hasMessages
+    return { hasConversation: hasMessages }
   } catch (error) {
     const errorMsg = (error as Error).message || ''
 
@@ -143,8 +148,8 @@ export async function hasExistingConversation(phone: string, retries: number = 3
     }
 
     console.error('Failed to check conversation history:', error, { phone })
-    // On error, assume no existing conversation to avoid blocking
-    return false
+    // Return error info so caller can decide what to do
+    return { hasConversation: false, error: errorMsg || 'Unknown error' }
   }
 }
 
@@ -155,6 +160,12 @@ function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
+export interface BatchConversationResult {
+  hasConversation: Set<string>
+  errorCount: number
+  errors: Array<{ phone: string; error: string }>
+}
+
 /**
  * Batch check multiple phones for existing conversations
  * Note: This makes individual API calls since OpenPhone doesn't support batch queries
@@ -163,23 +174,26 @@ function sleep(ms: number): Promise<void> {
 export async function checkManyConversations(
   phones: string[],
   options: { concurrency?: number; delayMs?: number } = {}
-): Promise<Set<string>> {
+): Promise<BatchConversationResult> {
   // Very conservative defaults to avoid rate limiting
   const { concurrency = 2, delayMs = 500 } = options
   const hasConversation = new Set<string>()
+  const errors: Array<{ phone: string; error: string }> = []
 
   // Process in small batches with delays to avoid overwhelming the API
   for (let i = 0; i < phones.length; i += concurrency) {
     const batch = phones.slice(i, i + concurrency)
     const results = await Promise.all(
       batch.map(async (phone) => {
-        const has = await hasExistingConversation(phone)
-        return { phone, has }
+        const result = await hasExistingConversation(phone)
+        return { phone, ...result }
       })
     )
 
-    for (const { phone, has } of results) {
-      if (has) {
+    for (const { phone, hasConversation: has, error } of results) {
+      if (error) {
+        errors.push({ phone, error })
+      } else if (has) {
         hasConversation.add(phone)
       }
     }
@@ -190,5 +204,5 @@ export async function checkManyConversations(
     }
   }
 
-  return hasConversation
+  return { hasConversation, errorCount: errors.length, errors }
 }

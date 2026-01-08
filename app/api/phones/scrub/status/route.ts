@@ -59,16 +59,24 @@ export async function POST(request: Request) {
       const settings = settingsRaw ? JSON.parse(settingsRaw as string) : {}
       const includeDnc = settings.includeDnc || false
 
-      // Filter and categorize results
-      const scrubbed = filterResults(result.DATA || [], { includeDnc })
+      // ALWAYS run filter with includeDnc=false first to get accurate DNC list for caching
+      // This ensures DNC phones are always cached as DNC, regardless of campaign settings
+      const scrubbedForCache = filterResults(result.DATA || [], { includeDnc: false })
 
-      // Save all results to our internal caches
+      // Now get results based on actual includeDnc setting for response
+      const scrubbed = includeDnc
+        ? filterResults(result.DATA || [], { includeDnc: true })
+        : scrubbedForCache
+
+      // Save all results to our internal caches using the includeDnc=false results
       // This prevents us from paying to re-check them in future campaigns
-      const dncPhones = scrubbed.removed.dnc.map(r => r.NUMBER)
-      const litigatorPhones = scrubbed.removed.litigator.map(r => r.NUMBER)
-      const landlinePhones = scrubbed.removed.landline.map(r => r.NUMBER)
-      const inactivePhones = scrubbed.removed.inactive.map(r => r.NUMBER)
-      const cleanPhones = scrubbed.clean.map(r => r.NUMBER)
+      // DNC phones are ALWAYS cached as DNC so future campaigns can find them
+      const dncPhones = scrubbedForCache.removed.dnc.map(r => r.NUMBER)
+      const litigatorPhones = scrubbedForCache.removed.litigator.map(r => r.NUMBER)
+      const landlinePhones = scrubbedForCache.removed.landline.map(r => r.NUMBER)
+      const inactivePhones = scrubbedForCache.removed.inactive.map(r => r.NUMBER)
+      // Only truly clean phones (no DNC) go to verified-clean cache
+      const cleanPhones = scrubbedForCache.clean.map(r => r.NUMBER)
 
       await Promise.all([
         addManyToDncList(dncPhones),

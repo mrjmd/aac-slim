@@ -130,10 +130,17 @@ async function addToEverMessaged(phone: string) {
   await redis.sadd('ever-messaged', phone)
 }
 
-async function handler(_request: Request, { body }: { body: SendPayload }) {
+async function handler(request: Request) {
+  console.log('[SEND] Handler started')
   try {
-    // Body is passed from verifySignatureAppRouter after signature verification
-    const payload = body
+    let payload: SendPayload
+    try {
+      payload = await request.json()
+      console.log('[SEND] Parsed payload:', JSON.stringify(payload))
+    } catch (parseErr) {
+      console.error('[SEND] Failed to parse request body:', parseErr)
+      return NextResponse.json({ error: 'Failed to parse body', details: String(parseErr) }, { status: 400 })
+    }
 
     console.log('Processing campaign message', {
       campaignId: payload.campaignId,

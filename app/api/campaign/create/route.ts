@@ -282,7 +282,10 @@ async function trackRecipient(
 // External API calls
 // ============================================
 
-async function createPipedriveContact(contact: NormalizedContact, _campaignName: string): Promise<{ id: number; created: boolean }> {
+// Pipedrive custom field for Lead Source tracking
+const PIPEDRIVE_LEAD_SOURCE_FIELD = '99d8fd03cd23f075951af87ddaf2b1b6aa8fed1f'
+
+async function createPipedriveContact(contact: NormalizedContact, campaignName: string): Promise<{ id: number; created: boolean }> {
   const apiKey = process.env.PIPEDRIVE_API_KEY
   const domain = process.env.PIPEDRIVE_COMPANY_DOMAIN
 
@@ -325,6 +328,7 @@ async function createPipedriveContact(contact: NormalizedContact, _campaignName:
           phone: [{ value: contact.phone, primary: true, label: 'mobile' }],
           email: contact.email ? [{ value: contact.email, primary: true, label: 'work' }] : undefined,
           visible_to: 3,
+          [PIPEDRIVE_LEAD_SOURCE_FIELD]: `Campaign: ${campaignName}`,
         }),
       }
     )

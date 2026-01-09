@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server'
 import { Redis } from '@upstash/redis'
 
 // Version for deployment verification - triggers redeploy
-const CODE_VERSION = 'v2026-01-09-fix-qstash-body'
+const CODE_VERSION = 'v2026-01-09-global-daily-limit'
 
 // Force dynamic rendering
 export const dynamic = 'force-dynamic'
@@ -36,6 +36,8 @@ interface HealthMetrics {
     totalSent24h: number
     totalResponses24h: number
     optOuts24h: number
+    dailyMessagesSent: number  // Global counter for today
+    dailyLimit: number         // From settings
   }
   errors: Array<{
     timestamp: string
@@ -60,7 +62,7 @@ export async function GET() {
         googleAds: { processed24h: 0, lastProcessed: null },
       },
       sync: { pdToQuo: 0, pdToQb: 0, phoneToPd: 0 },
-      campaigns: { active: 0, totalSent24h: 0, totalResponses24h: 0, optOuts24h: 0 },
+      campaigns: { active: 0, totalSent24h: 0, totalResponses24h: 0, optOuts24h: 0, dailyMessagesSent: 0, dailyLimit: 125 },
       errors: [],
       qstash: { pending: 0, failed: 0 },
     }
@@ -123,6 +125,17 @@ export async function GET() {
           metrics.campaigns.optOuts24h += campaign.stats.optOuts || 0
         }
       }
+    }
+
+    // Get global daily message counter
+    const dailyCount = await redis.get(`daily:messages:${today}`)
+    metrics.campaigns.dailyMessagesSent = Number(dailyCount) || 0
+
+    // Get daily limit from settings
+    const settingsData = await redis.get('settings:global')
+    if (settingsData) {
+      const settings = typeof settingsData === 'string' ? JSON.parse(settingsData) : settingsData
+      metrics.campaigns.dailyLimit = settings.campaign?.dailySendLimit || 125
     }
 
     // Get recent errors from Redis list

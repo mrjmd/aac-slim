@@ -125,6 +125,56 @@ async function addToEverMessaged(phone: string) {
   await redis.sadd('ever-messaged', phone)
 }
 
+// Get today's date key for daily counter (YYYY-MM-DD in local timezone)
+function getTodayKey(): string {
+  const now = new Date()
+  const year = now.getFullYear()
+  const month = String(now.getMonth() + 1).padStart(2, '0')
+  const day = String(now.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+// Get global settings
+async function getGlobalSettings(): Promise<{ dailySendLimit: number }> {
+  const redis = getRedis()
+  const data = await redis.get('settings:global')
+  if (!data) {
+    return { dailySendLimit: 125 } // Default
+  }
+  const settings = typeof data === 'string' ? JSON.parse(data) : data
+  return {
+    dailySendLimit: settings.campaign?.dailySendLimit || 125,
+  }
+}
+
+// Check global daily limit - returns { allowed: boolean, current: number, limit: number }
+async function checkGlobalDailyLimit(): Promise<{ allowed: boolean; current: number; limit: number }> {
+  const redis = getRedis()
+  const settings = await getGlobalSettings()
+  const todayKey = `daily:messages:${getTodayKey()}`
+
+  const current = await redis.get(todayKey)
+  const count = current ? parseInt(current as string) : 0
+
+  return {
+    allowed: count < settings.dailySendLimit,
+    current: count,
+    limit: settings.dailySendLimit,
+  }
+}
+
+// Increment global daily counter
+async function incrementDailyCounter(): Promise<number> {
+  const redis = getRedis()
+  const todayKey = `daily:messages:${getTodayKey()}`
+
+  // Increment and set TTL of 48 hours (to handle timezone edge cases)
+  const newCount = await redis.incr(todayKey)
+  await redis.expire(todayKey, 48 * 60 * 60)
+
+  return newCount
+}
+
 async function handler(request: Request) {
   console.log('[SEND] Handler started')
   try {
@@ -165,6 +215,25 @@ async function handler(request: Request) {
     //   return NextResponse.json({ success: true, skipped: true, reason: 'opted-out' })
     // }
 
+    // Check global daily limit (cumulative across all campaigns)
+    const dailyCheck = await checkGlobalDailyLimit()
+    if (!dailyCheck.allowed) {
+      console.log('[SEND] Global daily limit reached', {
+        current: dailyCheck.current,
+        limit: dailyCheck.limit,
+        phone: payload.phone,
+        campaignId: payload.campaignId,
+      })
+      await incrementStats(payload.campaignId, 'skipped')
+      return NextResponse.json({
+        success: true,
+        skipped: true,
+        reason: 'daily-limit',
+        dailyCount: dailyCheck.current,
+        dailyLimit: dailyCheck.limit,
+      })
+    }
+
     // Send the message
     try {
       const { phoneNumber } = getQuoConfig()
@@ -174,6 +243,7 @@ async function handler(request: Request) {
       await addCampaignContact(payload.campaignId, payload.phone, payload.variant)
       await addToEverMessaged(payload.phone)
       await incrementStats(payload.campaignId, 'sent')
+      const dailyTotal = await incrementDailyCounter()
 
       if (payload.variant) {
         await incrementVariantStats(payload.campaignId, payload.variant, 'sent')
@@ -183,9 +253,10 @@ async function handler(request: Request) {
         campaignId: payload.campaignId,
         phone: payload.phone,
         messageId: result.id,
+        dailyTotal,
       })
 
-      return NextResponse.json({ success: true, messageId: result.id })
+      return NextResponse.json({ success: true, messageId: result.id, dailyTotal })
     } catch (sendError) {
       console.error('Failed to send campaign message', sendError)
       await incrementStats(payload.campaignId, 'failed')

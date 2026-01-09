@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { Redis } from '@upstash/redis'
 
-// Version for deployment verification
+// Version for deployment verification - triggers redeploy
 const CODE_VERSION = 'v2026-01-09-fix-qstash-body'
 
 // Force dynamic rendering

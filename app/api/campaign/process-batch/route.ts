@@ -167,7 +167,8 @@ async function handler(request: Request) {
     }
 
     // Process the batch
-    const callbackUrl = `${process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'https://aac-middleware.vercel.app'}/api/campaign/send`
+    // Always use production URL for consistent signature verification
+    const callbackUrl = 'https://aac-middleware.vercel.app/api/campaign/send'
 
     let queueIndex = 0
     let queued = 0

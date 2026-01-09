@@ -448,8 +448,9 @@ export async function POST(request: Request) {
       }
     }
 
-    const callbackUrl = `${process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'https://aac-middleware.vercel.app'}/api/campaign/send`
-    const batchCallbackUrl = `${process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'https://aac-middleware.vercel.app'}/api/campaign/process-batch`
+    // Always use production URL - VERCEL_URL returns deployment-specific URLs which can cause signature verification issues
+    const callbackUrl = 'https://aac-middleware.vercel.app/api/campaign/send'
+    const batchCallbackUrl = 'https://aac-middleware.vercel.app/api/campaign/process-batch'
 
     const results = {
       campaignId, parseStats, processed: 0, queued: 0, skipped: 0, pipedriveCreated: 0,

@@ -98,7 +98,8 @@ export async function POST(request: Request) {
       errors: [] as string[],
     }
 
-    const callbackUrl = `${process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'https://aac-middleware.vercel.app'}/api/campaign/send`
+    // Always use production URL for consistent signature verification
+    const callbackUrl = 'https://aac-middleware.vercel.app/api/campaign/send'
 
     for (const campaignId of campaignIds) {
       try {

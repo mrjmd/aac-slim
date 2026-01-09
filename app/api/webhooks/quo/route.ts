@@ -23,11 +23,11 @@ import {
   findCampaignForPhone,
   incrementCampaignStats,
   incrementVariantStats,
-  addOptOut,
   isOptOutMessage,
   markRecipientResponded,
   trackWebhookProcessed,
   logHealthError,
+  getRedis,
 } from '@/lib/redis'
 import { searchPersonByPhone, createPerson, logActivity, updatePersonIncremental } from '@/clients/pipedrive'
 import { extractEntities, hasUsefulEntities } from '@/clients/gemini'
@@ -422,36 +422,49 @@ export async function POST(request: Request) {
     if (event.type === 'message.received') {
       const messageBody = eventData.body || ''
 
-      // Check if this phone is part of any active campaign
-      const campaignResult = await findCampaignForPhone(e164Phone)
+      // Check for opt-out FIRST - applies to anyone we've ever messaged
+      // This must happen before campaign check because campaigns may be completed
+      if (isOptOutMessage(messageBody)) {
+        // Check if we've ever messaged this phone (from any campaign)
+        const redis = getRedis()
+        const normalizedPhone = e164Phone.replace(/\D/g, '').slice(-10)
+        const wasMessaged = await redis.sismember('suppression:ever-messaged', normalizedPhone)
 
-      if (campaignResult) {
-        const { campaign, variant } = campaignResult
+        if (wasMessaged === 1) {
+          log.info('Opt-out detected from previously messaged phone', { phone: e164Phone })
 
-        log.info('Inbound message from campaign contact', {
-          phone: e164Phone,
-          campaignId: campaign.id,
-          variant,
-        })
+          // Add to global opt-out list (using 10-digit format for consistency)
+          await redis.sadd('optouts:phones', normalizedPhone)
 
-        // Mark recipient as responded (prevents follow-up messages)
-        await markRecipientResponded(e164Phone)
+          // Mark as responded to prevent follow-ups
+          await markRecipientResponded(e164Phone)
 
-        // Check for opt-out first
-        if (isOptOutMessage(messageBody)) {
-          log.info('Opt-out detected', { phone: e164Phone, campaignId: campaign.id })
-
-          // Add to global opt-out list
-          await addOptOut(e164Phone)
-
-          // Update campaign stats
-          await incrementCampaignStats(campaign.id, { optOuts: 1 })
-
-          // Update variant stats if applicable
-          if (variant) {
-            await incrementVariantStats(campaign.id, variant, { optOuts: 1 })
+          // Try to update campaign stats if campaign is still active
+          const campaignResult = await findCampaignForPhone(e164Phone)
+          if (campaignResult) {
+            const { campaign, variant } = campaignResult
+            await incrementCampaignStats(campaign.id, { optOuts: 1 })
+            if (variant) {
+              await incrementVariantStats(campaign.id, variant, { optOuts: 1 })
+            }
           }
-        } else {
+        }
+      } else {
+        // Not an opt-out - check if this phone is part of any active campaign
+        const campaignResult = await findCampaignForPhone(e164Phone)
+
+        if (campaignResult) {
+          const { campaign, variant } = campaignResult
+
+          log.info('Inbound message from campaign contact', {
+            phone: e164Phone,
+            campaignId: campaign.id,
+            variant,
+          })
+
+          // Mark recipient as responded (prevents follow-up messages)
+          await markRecipientResponded(e164Phone)
+
           // Track as a response
           await incrementCampaignStats(campaign.id, { responses: 1 })
 

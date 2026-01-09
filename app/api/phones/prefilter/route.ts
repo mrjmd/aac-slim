@@ -65,24 +65,38 @@ export async function POST(request: NextRequest) {
         let afterSuppression: Array<{ id: string; phone: string }> = []
         let verifiedCleanPhones: Array<{ id: string; phone: string }> = []
 
-        // Track DNC phones separately - they're cached but may be included based on settings
-        let cachedDncPhones: Array<{ id: string; phone: string }> = []
+        // Track DNC-only phones separately (DNC but NOT landline/litigator/optout)
+        // These may be included based on includeDnc setting
+        let cachedDncOnlyPhones: Array<{ id: string; phone: string }> = []
 
         for (const phone of validPhones) {
-          const suppressedReason = cacheResults.suppressed.get(phone.phone)
-          if (suppressedReason) {
-            // DNC phones are cached - never re-send to SearchBug
-            // But track them separately so includeDnc toggle can include them later
-            if (suppressedReason === 'dnc') {
-              cachedDncPhones.push(phone)
+          const fullReasons = cacheResults.suppressedFull.get(phone.phone)
+
+          if (fullReasons) {
+            // ALWAYS filter litigators, landlines, optouts, and inactive - regardless of includeDnc
+            if (fullReasons.litigator) {
+              removed.litigator++
+              continue
+            }
+            if (fullReasons.landline) {
+              removed.landline++
+              continue
+            }
+            if (fullReasons.optout) {
+              removed.optout++
+              continue
+            }
+            if (fullReasons.inactive) {
+              removed.inactive++
+              continue
+            }
+
+            // If ONLY DNC (no other suppression reasons), track separately
+            if (fullReasons.dnc) {
+              cachedDncOnlyPhones.push(phone)
               removed.dnc++
               continue
             }
-            // Other suppression reasons - always filter
-            if (suppressedReason === 'optout') removed.optout++
-            else if (suppressedReason === 'litigator') removed.litigator++
-            else if (suppressedReason === 'landline') removed.landline++
-            else if (suppressedReason === 'inactive') removed.inactive++
           } else if (cacheResults.verifiedClean.has(phone.phone)) {
             // Already verified clean - skip SearchBug but include in final list
             verifiedCleanPhones.push(phone)
@@ -91,9 +105,10 @@ export async function POST(request: NextRequest) {
           }
         }
 
-        // If includeDnc is enabled, add cached DNC phones to verified clean list
-        if (body.includeDnc && cachedDncPhones.length > 0) {
-          verifiedCleanPhones.push(...cachedDncPhones)
+        // If includeDnc is enabled, add DNC-only phones to verified clean list
+        // (They're ONLY DNC - not landline, not litigator, not optout)
+        if (body.includeDnc && cachedDncOnlyPhones.length > 0) {
+          verifiedCleanPhones.push(...cachedDncOnlyPhones)
           // Adjust the removed count since we're including them
           removed.dnc = 0
         }

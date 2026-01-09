@@ -68,15 +68,24 @@ export async function POST(request: Request) {
         ? filterResults(result.DATA || [], { includeDnc: true })
         : scrubbedForCache
 
-      // Save all results to our internal caches using the includeDnc=false results
-      // This prevents us from paying to re-check them in future campaigns
-      // DNC phones are ALWAYS cached as DNC so future campaigns can find them
-      const dncPhones = scrubbedForCache.removed.dnc.map(r => r.NUMBER)
-      const litigatorPhones = scrubbedForCache.removed.litigator.map(r => r.NUMBER)
-      const landlinePhones = scrubbedForCache.removed.landline.map(r => r.NUMBER)
-      const inactivePhones = scrubbedForCache.removed.inactive.map(r => r.NUMBER)
-      // Only truly clean phones (no DNC) go to verified-clean cache
-      const cleanPhones = scrubbedForCache.clean.map(r => r.NUMBER)
+      // IMPORTANT: Cache ALL attributes from raw SearchBug data, not just filtered results
+      // filterResults uses priority order (DNC before landline) but we need to cache ALL
+      // This prevents a DNC+landline from passing through when includeDnc=true
+      const rawData = result.DATA || []
+
+      // Cache based on raw SearchBug attributes, not filtered results
+      const dncPhones = rawData.filter(r => r.DNC !== 'NO').map(r => r.NUMBER)
+      const litigatorPhones = rawData.filter(r => r.TCPA === 'YES').map(r => r.NUMBER)
+      const landlinePhones = rawData.filter(r => r.TYPE === 'LANDLINE').map(r => r.NUMBER)
+      const inactivePhones = rawData.filter(r => r.STATUS === 'INACTIVE' || r.STATUS === 'INVALID').map(r => r.NUMBER)
+      // Only truly clean phones go to verified-clean cache (no DNC, no landline, no litigator, active)
+      const cleanPhones = rawData.filter(r =>
+        r.DNC === 'NO' &&
+        r.TCPA !== 'YES' &&
+        r.TYPE !== 'LANDLINE' &&
+        r.STATUS !== 'INACTIVE' &&
+        r.STATUS !== 'INVALID'
+      ).map(r => r.NUMBER)
 
       await Promise.all([
         addManyToDncList(dncPhones),

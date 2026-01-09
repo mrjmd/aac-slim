@@ -152,17 +152,33 @@ export async function isVerifiedCleanRecent(phone: string): Promise<boolean> {
 }
 
 /**
+ * Suppression reasons for a phone
+ */
+export interface PhoneSuppressionReasons {
+  optout: boolean
+  dnc: boolean
+  litigator: boolean
+  landline: boolean
+  inactive: boolean
+  // Primary reason for backward compatibility (returns first found)
+  primary: 'optout' | 'dnc' | 'litigator' | 'landline' | 'inactive' | null
+}
+
+/**
  * Batch check phones against all caches
  * Returns categorized results for efficient pre-filtering
  * NOTE: Returns results keyed by ORIGINAL phone format, but checks using normalized 10-digit format
+ * IMPORTANT: Returns ALL suppression reasons per phone, not just the first one
  */
 export async function batchCheckCache(phones: string[]): Promise<{
   suppressed: Map<string, 'optout' | 'dnc' | 'litigator' | 'landline' | 'inactive'>
+  suppressedFull: Map<string, PhoneSuppressionReasons>
   verifiedClean: Set<string>
   needsScrub: string[]
 }> {
   const redis = getRedis()
   const suppressed = new Map<string, 'optout' | 'dnc' | 'litigator' | 'landline' | 'inactive'>()
+  const suppressedFull = new Map<string, PhoneSuppressionReasons>()
   const verifiedClean = new Set<string>()
   const needsScrub: string[] = []
 
@@ -174,59 +190,54 @@ export async function batchCheckCache(phones: string[]): Promise<{
     // Normalize to 10 digits for cache lookup
     const normalized = normalizePhone(phone)
 
-    // Check permanent suppression lists using normalized phone
-    const [isOptOut, isDnc, isLit, isLandline] = await Promise.all([
+    // Check ALL suppression lists using normalized phone
+    const [isOptOut, isDnc, isLit, isLandline, inactiveTs, cleanTs] = await Promise.all([
       redis.sismember(KEYS.optOutPhones, normalized),
       redis.sismember(KEYS.dncPhones, normalized),
       redis.sismember(KEYS.litigatorPhones, normalized),
       redis.sismember(KEYS.landlinePhones, normalized),
-    ])
-
-    // Return results keyed by original phone format for caller convenience
-    if (isLit === 1) {
-      suppressed.set(phone, 'litigator')
-      continue
-    }
-    if (isDnc === 1) {
-      suppressed.set(phone, 'dnc')
-      continue
-    }
-    if (isOptOut === 1) {
-      suppressed.set(phone, 'optout')
-      continue
-    }
-    if (isLandline === 1) {
-      suppressed.set(phone, 'landline')
-      continue
-    }
-
-    // Check time-limited caches using normalized phone
-    const [inactiveTs, cleanTs] = await Promise.all([
       redis.hget(KEYS.inactivePhones, normalized),
       redis.hget(KEYS.verifiedClean, normalized),
     ])
 
-    if (inactiveTs) {
-      const age = now - parseInt(inactiveTs as string)
-      if (age < inactiveMaxAge) {
-        suppressed.set(phone, 'inactive')
-        continue
-      }
+    const isInactive = inactiveTs && (now - parseInt(inactiveTs as string)) < inactiveMaxAge
+    const isClean = cleanTs && (now - parseInt(cleanTs as string)) < cleanMaxAge
+
+    // Build full suppression reasons
+    const reasons: PhoneSuppressionReasons = {
+      optout: isOptOut === 1,
+      dnc: isDnc === 1,
+      litigator: isLit === 1,
+      landline: isLandline === 1,
+      inactive: !!isInactive,
+      primary: null,
     }
 
-    if (cleanTs) {
-      const age = now - parseInt(cleanTs as string)
-      if (age < cleanMaxAge) {
-        verifiedClean.add(phone)
-        continue
-      }
+    // Determine primary reason (priority order)
+    if (isLit === 1) reasons.primary = 'litigator'
+    else if (isDnc === 1) reasons.primary = 'dnc'
+    else if (isOptOut === 1) reasons.primary = 'optout'
+    else if (isLandline === 1) reasons.primary = 'landline'
+    else if (isInactive) reasons.primary = 'inactive'
+
+    // If ANY suppression reason exists
+    if (reasons.primary) {
+      suppressed.set(phone, reasons.primary)
+      suppressedFull.set(phone, reasons)
+      continue
+    }
+
+    // Check if verified clean
+    if (isClean) {
+      verifiedClean.add(phone)
+      continue
     }
 
     // Not in any cache - needs SearchBug scrub
     needsScrub.push(phone)
   }
 
-  return { suppressed, verifiedClean, needsScrub }
+  return { suppressed, suppressedFull, verifiedClean, needsScrub }
 }
 
 /**

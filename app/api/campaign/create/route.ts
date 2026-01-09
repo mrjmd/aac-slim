@@ -325,8 +325,6 @@ async function createPipedriveContact(contact: NormalizedContact, campaignName: 
           phone: [{ value: contact.phone, primary: true, label: 'mobile' }],
           email: contact.email ? [{ value: contact.email, primary: true, label: 'work' }] : undefined,
           visible_to: 3,
-          // Custom field for lead source
-          '9c5cc1715fdd7b997dbd81a09c75f2c399f29dee': `Campaign: ${campaignName}`,
         }),
       }
     )

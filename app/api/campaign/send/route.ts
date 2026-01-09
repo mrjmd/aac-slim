@@ -130,9 +130,10 @@ async function addToEverMessaged(phone: string) {
   await redis.sadd('ever-messaged', phone)
 }
 
-async function handler(request: Request) {
+async function handler(_request: Request, { body }: { body: SendPayload }) {
   try {
-    const payload: SendPayload = await request.json()
+    // Body is passed from verifySignatureAppRouter after signature verification
+    const payload = body
 
     console.log('Processing campaign message', {
       campaignId: payload.campaignId,

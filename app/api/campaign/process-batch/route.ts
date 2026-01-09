@@ -93,12 +93,11 @@ function calculateNextBatchTime(startHour: number, skipWeekends: boolean): Date 
   return next
 }
 
-async function handler(request: Request) {
+async function handler(request: Request, { body }: { body: BatchRequest }) {
   try {
     const redis = getRedis()
     const qstash = getQstash()
 
-    const body: BatchRequest = await request.json()
     const { campaignId, optOutFooter, throttleSeconds } = body
     // skipDedup removed - dedup is now done only in prefilter
 

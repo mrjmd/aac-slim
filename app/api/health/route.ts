@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server'
 import { Redis } from '@upstash/redis'
 
 // Version for deployment verification
-const CODE_VERSION = 'v2026-01-08-fix-skipped'
+const CODE_VERSION = 'v2026-01-09-fix-qstash-body'
 
 // Force dynamic rendering
 export const dynamic = 'force-dynamic'

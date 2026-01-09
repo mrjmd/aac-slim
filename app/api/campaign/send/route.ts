@@ -50,7 +50,7 @@ async function sendMessage(from: string, to: string, text: string) {
     body: JSON.stringify({
       from,
       to: [to],
-      text,
+      content: text,
     }),
   })
 

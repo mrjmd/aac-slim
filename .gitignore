@@ -39,3 +39,4 @@ coverage/
 /playwright/.cache/
 /playwright/.auth/
 /tests/.auth/
+.env.vercel

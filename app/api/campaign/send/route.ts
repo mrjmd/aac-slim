@@ -93,13 +93,8 @@ async function incrementStats(campaignId: string, field: string) {
 
   campaign.stats[field] = (campaign.stats[field] || 0) + 1
 
-  // Auto-complete single-day campaigns
-  if (!campaign.multiDay && campaign.status === 'running') {
-    const { sent, failed, skipped, queued } = campaign.stats
-    if (queued > 0 && sent + failed + skipped >= queued) {
-      campaign.status = 'completed'
-    }
-  }
+  // Don't auto-complete campaigns - keep them running for response tracking
+  // User must manually complete campaigns via the UI
 
   await redis.set(`campaign:${campaignId}`, JSON.stringify(campaign))
 }

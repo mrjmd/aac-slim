@@ -142,15 +142,15 @@ async function handler(request: Request) {
     const pendingKey = `campaign:${campaignId}:pending`
     const pendingRaw = await redis.get(pendingKey) as string | null
     if (!pendingRaw) {
-      // No more contacts - campaign complete
-      campaign.status = 'completed'
+      // No more contacts to send - but keep campaign running for response tracking
+      // User must manually complete campaigns via the UI
       campaign.multiDay.nextBatchAt = null
       await redis.set(`campaign:${campaignId}`, JSON.stringify(campaign))
 
       return NextResponse.json({
         success: true,
         complete: true,
-        message: 'Campaign completed - no more contacts',
+        message: 'All messages sent - campaign still active for response tracking',
       })
     }
 

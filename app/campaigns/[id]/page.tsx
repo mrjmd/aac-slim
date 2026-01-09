@@ -214,6 +214,19 @@ export default function CampaignDetailPage() {
               style={{ width: `${progress}%` }}
             />
           </div>
+          {/* Single-day campaign: show "all sent" message when complete */}
+          {!campaign.multiDay && campaign.stats.queued > 0 &&
+            campaign.stats.sent + campaign.stats.failed + campaign.stats.skipped >= campaign.stats.queued && (
+            <div className="mt-4 bg-green-50 rounded-lg p-4">
+              <p className="text-sm text-green-800">
+                All messages sent - campaign is active for response tracking
+                {campaign.followUp && ` and follow-ups (${campaign.followUp.delayDays} day delay)`}
+              </p>
+              <p className="text-xs text-green-600 mt-1">
+                Archive the campaign when you&apos;re done tracking responses
+              </p>
+            </div>
+          )}
         </div>
       )}
 
@@ -311,17 +324,21 @@ export default function CampaignDetailPage() {
             )}
 
             {!campaign.multiDay.nextBatchAt && campaign.status === 'running' && (
-              <div className="bg-yellow-50 rounded-lg p-4">
-                <p className="text-sm text-yellow-800">
-                  Final batch in progress - campaign will complete when all messages are sent
+              <div className="bg-green-50 rounded-lg p-4">
+                <p className="text-sm text-green-800">
+                  All messages sent - campaign is active for response tracking
+                  {campaign.followUp && ` and follow-ups (${campaign.followUp.delayDays} day delay)`}
+                </p>
+                <p className="text-xs text-green-600 mt-1">
+                  Archive the campaign when you&apos;re done tracking responses
                 </p>
               </div>
             )}
 
             {campaign.status === 'completed' && (
-              <div className="bg-green-50 rounded-lg p-4">
-                <p className="text-sm text-green-800">
-                  Campaign completed after {campaign.multiDay.currentDay} days
+              <div className="bg-gray-50 rounded-lg p-4">
+                <p className="text-sm text-gray-800">
+                  Campaign archived after {campaign.multiDay.currentDay} days
                 </p>
               </div>
             )}

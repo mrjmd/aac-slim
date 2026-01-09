@@ -290,13 +290,14 @@ async function createPipedriveContact(contact: NormalizedContact, campaignName: 
     throw new Error(`Pipedrive credentials not configured: apiKey=${!!apiKey}, domain=${!!domain}`)
   }
 
-  // Search for existing
+  // Search for existing - use api.pipedrive.com (not ${domain}.pipedrive.com)
   let searchRes: Response
   try {
     searchRes = await fetch(
-      `https://${domain}.pipedrive.com/api/v1/persons/search?term=${encodeURIComponent(contact.phone)}&fields=phone&api_token=${apiKey}`
+      `https://api.pipedrive.com/v1/persons/search?term=${encodeURIComponent(contact.phone)}&fields=phone&api_token=${apiKey}`
     )
   } catch (fetchError) {
+    console.error('[PIPEDRIVE] Search fetch error:', fetchError)
     throw new Error(`Pipedrive search fetch failed: ${(fetchError as Error).message}`)
   }
 
@@ -311,11 +312,11 @@ async function createPipedriveContact(contact: NormalizedContact, campaignName: 
     return { id: searchData.data.items[0].item.id, created: false }
   }
 
-  // Create new
+  // Create new - use api.pipedrive.com (not ${domain}.pipedrive.com)
   let createRes: Response
   try {
     createRes = await fetch(
-      `https://${domain}.pipedrive.com/api/v1/persons?api_token=${apiKey}`,
+      `https://api.pipedrive.com/v1/persons?api_token=${apiKey}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

@@ -73,38 +73,8 @@ function calcResponseRate(responses: number, sent: number): string {
  * Fixes historical campaigns stuck on 'running'
  */
 function deriveStatus(campaign: Campaign): Campaign['status'] {
-  // Don't change paused or pending
-  if (campaign.status === 'paused' || campaign.status === 'pending') {
-    return campaign.status
-  }
-
-  // Already completed
-  if (campaign.status === 'completed') {
-    return 'completed'
-  }
-
-  // For 'running' campaigns, check if they should be completed
-  const { sent, failed, skipped, queued } = campaign.stats
-  const processed = sent + failed + skipped
-
-  // Multi-day campaigns: check if all batches are done
-  if (campaign.multiDay) {
-    // If there's a next batch scheduled, still running
-    if (campaign.multiDay.nextBatchAt) {
-      return 'running'
-    }
-    // If total contacts are processed, completed
-    if (processed >= campaign.multiDay.totalContacts) {
-      return 'completed'
-    }
-    return 'running'
-  }
-
-  // Single-day campaigns: completed when all queued messages are processed
-  if (queued > 0 && processed >= queued) {
-    return 'completed'
-  }
-
+  // Don't auto-complete campaigns - user must manually archive
+  // Just return the stored status as-is
   return campaign.status
 }
 

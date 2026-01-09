@@ -37,30 +37,10 @@ interface Campaign {
 }
 
 /**
- * Derive the actual status (matches stats endpoint logic)
- * Fixes historical campaigns stuck on 'running'
+ * Return the stored status - don't auto-complete
+ * User must manually archive campaigns
  */
 function deriveStatus(campaign: Campaign): Campaign['status'] {
-  if (campaign.status === 'paused' || campaign.status === 'pending') {
-    return campaign.status
-  }
-  if (campaign.status === 'completed') {
-    return 'completed'
-  }
-
-  const { sent, failed, skipped, queued } = campaign.stats
-  const processed = sent + failed + skipped
-
-  if (campaign.multiDay) {
-    if (campaign.multiDay.nextBatchAt) return 'running'
-    if (processed >= campaign.multiDay.totalContacts) return 'completed'
-    return 'running'
-  }
-
-  if (queued > 0 && processed >= queued) {
-    return 'completed'
-  }
-
   return campaign.status
 }
 

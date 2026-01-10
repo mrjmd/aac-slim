@@ -103,12 +103,13 @@ async function handler(request: Request) {
     // skipDedup removed - dedup is now done only in prefilter
 
     // Get campaign data
-    const campaignRaw = await redis.get(`campaign:${campaignId}`) as string | null
+    const campaignRaw = await redis.get(`campaign:${campaignId}`)
     if (!campaignRaw) {
       return NextResponse.json({ error: 'Campaign not found' }, { status: 404 })
     }
 
-    const campaign = JSON.parse(campaignRaw)
+    // Upstash Redis may return already-parsed object or string
+    const campaign = typeof campaignRaw === 'string' ? JSON.parse(campaignRaw) : campaignRaw
     if (!campaign.multiDay) {
       return NextResponse.json({ error: 'Not a multi-day campaign' }, { status: 400 })
     }
@@ -154,7 +155,7 @@ async function handler(request: Request) {
       })
     }
 
-    const allContacts: NormalizedContact[] = JSON.parse(pendingRaw)
+    const allContacts: NormalizedContact[] = typeof pendingRaw === 'string' ? JSON.parse(pendingRaw) : pendingRaw
     const batchSize = campaign.multiDay.dailyLimit
     const batch = allContacts.slice(0, batchSize)
     const remaining = allContacts.slice(batchSize)

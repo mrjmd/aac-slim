@@ -7,6 +7,7 @@ import {
   addManyToLandlineList,
   addManyToInactiveList,
   addManyToVerifiedClean,
+  cacheSearchBugResults,
 } from '@/app/lib/suppression'
 
 function getRedis() {
@@ -93,6 +94,8 @@ export async function POST(request: Request) {
         addManyToLandlineList(landlinePhones),
         addManyToInactiveList(inactivePhones),
         addManyToVerifiedClean(cleanPhones),
+        // Cache full SearchBug response for auditing (90-day retention)
+        cacheSearchBugResults(rawData),
       ])
 
       return NextResponse.json({

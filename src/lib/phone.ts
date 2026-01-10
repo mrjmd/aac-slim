@@ -98,3 +98,63 @@ export function phonesMatch(
   if (!normalized1 || !normalized2) return false;
   return normalized1 === normalized2;
 }
+
+/**
+ * Get 10-digit format for Redis storage
+ * Redis stores phones as 10-digit strings (no +1 prefix)
+ *
+ * @example
+ * toRedisPhone('+14155551234') // '4155551234'
+ * toRedisPhone('(415) 555-1234') // '4155551234'
+ * toRedisPhone('14155551234') // '4155551234'
+ */
+export function toRedisPhone(phone: string | null | undefined): string | null {
+  if (!phone) return null;
+
+  // Strip all non-digits
+  const digits = phone.replace(/\D/g, '');
+
+  // Handle 11-digit with leading 1 (US country code)
+  if (digits.length === 11 && digits.startsWith('1')) {
+    return digits.slice(1);
+  }
+
+  // Handle 10-digit
+  if (digits.length === 10) {
+    return digits;
+  }
+
+  // For other lengths, take last 10 digits
+  if (digits.length > 10) {
+    return digits.slice(-10);
+  }
+
+  // Too short
+  return null;
+}
+
+/**
+ * Quick normalize without libphonenumber - for performance-critical paths
+ * Returns E.164 format for US numbers
+ *
+ * @example
+ * quickNormalizePhone('(415) 555-1234') // '+14155551234'
+ * quickNormalizePhone('4155551234') // '+14155551234'
+ */
+export function quickNormalizePhone(phone: string | null | undefined): string | null {
+  if (!phone) return null;
+
+  const digits = phone.replace(/\D/g, '');
+
+  if (digits.length === 10) {
+    return `+1${digits}`;
+  }
+
+  if (digits.length === 11 && digits.startsWith('1')) {
+    return `+${digits}`;
+  }
+
+  // For international or weird formats, fall back to null
+  // (caller should use full normalizePhone if needed)
+  return null;
+}

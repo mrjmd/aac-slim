@@ -7,6 +7,7 @@
 
 import { NextResponse } from 'next/server'
 import { verifySignatureAppRouter } from '@upstash/qstash/nextjs'
+import { toRedisPhone } from '@/src/lib/phone'
 
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
@@ -63,17 +64,11 @@ async function sendMessage(from: string, to: string, text: string) {
   return { id: data.data?.id || 'unknown' }
 }
 
-// Normalize phone to 10 digits for consistent cache lookups
-function normalizePhone(phone: string): string {
-  const digits = phone.replace(/\D/g, '')
-  return digits.slice(-10)
-}
-
 // Check if phone is opted out
 async function isOptedOut(phone: string): Promise<boolean> {
   const redis = getRedis()
-  const normalized = normalizePhone(phone)
-  // Check the correct key that matches suppression.ts
+  const normalized = toRedisPhone(phone)
+  if (!normalized) return false
   return await redis.sismember('optouts:phones', normalized)
 }
 
@@ -119,10 +114,14 @@ async function addCampaignContact(campaignId: string, phone: string, variant?: s
   await redis.sadd(`campaign:${campaignId}:contacts`, value)
 }
 
-// Add to ever-messaged list
+// Add to ever-messaged list (for opt-out tracking)
 async function addToEverMessaged(phone: string) {
   const redis = getRedis()
-  await redis.sadd('ever-messaged', phone)
+  const normalized = toRedisPhone(phone)
+  if (normalized) {
+    // Use the same key as webhook checks: suppression:ever-messaged
+    await redis.sadd('suppression:ever-messaged', normalized)
+  }
 }
 
 // Get today's date key for daily counter (YYYY-MM-DD in local timezone)
@@ -201,19 +200,12 @@ async function handler(request: Request) {
     }
 
     // Check opt-out list
-    // TEMPORARILY DISABLED FOR DEBUGGING - TODO: re-enable after fixing
     const optedOut = await isOptedOut(payload.phone)
-    console.log('[SEND v3] Opt-out check DISABLED FOR DEBUG', {
-      phone: payload.phone,
-      normalized: normalizePhone(payload.phone),
-      optedOut,
-      wouldSkip: optedOut
-    })
-    // if (optedOut) {
-    //   console.log('[SEND v3] Skipping opted-out phone', { phone: payload.phone })
-    //   await incrementStats(payload.campaignId, 'skipped')
-    //   return NextResponse.json({ success: true, skipped: true, reason: 'opted-out' })
-    // }
+    if (optedOut) {
+      console.log('[SEND] Skipping opted-out phone', { phone: payload.phone })
+      await incrementStats(payload.campaignId, 'skipped')
+      return NextResponse.json({ success: true, skipped: true, reason: 'opted-out' })
+    }
 
     // Check global daily limit (cumulative across all campaigns)
     const dailyCheck = await checkGlobalDailyLimit()

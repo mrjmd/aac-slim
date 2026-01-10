@@ -8,12 +8,14 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint src/**/*.ts",
-    "test": "vitest",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui",
     "typecheck": "tsc --noEmit",
     "campaign:start": "npx tsx scripts/run-campaign.ts",
-    "campaign:stats": "npx tsx -e \"const { getCampaign } = require('./src/lib/redis.js'); getCampaign(process.argv[2]).then(c => console.log(JSON.stringify(c, null, 2)))\""
+    "campaign:stats": "npx tsx -e \"const { getCampaign } = require('./src/lib/redis.js'); getCampaign(process.argv[2]).then(c => console.log(JSON.stringify(c, null, 2)))\"",
+    "prepare": "husky"
   },
   "dependencies": {
     "@upstash/qstash": "^2.8.4",
@@ -33,13 +35,21 @@
     "@types/react-dom": "^19.2.3",
     "@vercel/node": "^3.0.0",
     "autoprefixer": "^10.4.23",
+    "husky": "^9.1.7",
+    "lint-staged": "^16.2.7",
     "postcss": "^8.5.6",
     "tailwindcss": "^4.1.18",
     "tsx": "^4.21.0",
     "typescript": "^5.3.0",
+    "vite-tsconfig-paths": "^6.0.4",
     "vitest": "^1.0.0"
   },
   "engines": {
     "node": ">=18"
+  },
+  "lint-staged": {
+    "*.{ts,tsx}": [
+      "vitest related --run"
+    ]
   }
 }

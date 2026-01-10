@@ -4,6 +4,7 @@
  */
 
 import { Redis } from '@upstash/redis'
+import { toRedisPhone } from '@/src/lib/phone'
 
 function getRedis() {
   const url = process.env.UPSTASH_REDIS_REST_URL
@@ -23,6 +24,8 @@ const KEYS = {
   verifiedClean: 'cache:verified-clean', // Hash with phone -> timestamp
   // Global tracking of all phones ever sent to (across all campaigns)
   everMessaged: 'suppression:ever-messaged',
+  // Full SearchBug response cache for auditing
+  searchbugRaw: 'cache:searchbug-raw', // Hash with phone -> JSON response
 }
 
 // Cache TTLs
@@ -31,13 +34,10 @@ const CLEAN_CACHE_DAYS = 60
 
 /**
  * Normalize phone to 10 digits for consistent cache keys
- * Handles: +14155551234, 14155551234, 4155551234 -> 4155551234
+ * Uses canonical toRedisPhone from src/lib/phone
  */
 function normalizePhone(phone: string): string {
-  // Remove all non-digits
-  const digits = phone.replace(/\D/g, '')
-  // Take last 10 digits (handles +1, 1, or no prefix)
-  return digits.slice(-10)
+  return toRedisPhone(phone) || phone.replace(/\D/g, '').slice(-10)
 }
 
 /**
@@ -100,6 +100,84 @@ export async function addManyToVerifiedClean(phones: string[]): Promise<void> {
     await redis.hset(KEYS.verifiedClean, { [normalizePhone(phone)]: timestamp })
   }
   console.log(`Added ${phones.length} phones to verified clean cache`)
+}
+
+/**
+ * SearchBug raw data structure for caching
+ */
+interface SearchBugCacheEntry {
+  type: string // CELLULAR, VOIP, LANDLINE, UNKNOWN
+  status: string // ACTIVE, INACTIVE, NOT_VERIFIED, INVALID
+  dnc: string // NO, FED, state codes, CPL
+  tcpa: string // YES, NO
+  carrier: string
+  ported: string // YES, NO
+  state: string
+  timestamp: number // When cached
+}
+
+/**
+ * Store full SearchBug response for a batch of phones
+ * Used for auditing why phones bounced or were filtered
+ */
+export async function cacheSearchBugResults(
+  results: Array<{
+    NUMBER: string
+    TYPE: string
+    STATUS: string
+    DNC: string
+    TCPA: string
+    CARRIER: string
+    PORTED: string
+    STATE: string
+  }>
+): Promise<void> {
+  if (results.length === 0) return
+  const redis = getRedis()
+  const timestamp = Date.now()
+
+  for (const r of results) {
+    const entry: SearchBugCacheEntry = {
+      type: r.TYPE || 'UNKNOWN',
+      status: r.STATUS || 'UNKNOWN',
+      dnc: r.DNC || 'NO',
+      tcpa: r.TCPA || 'NO',
+      carrier: r.CARRIER || 'UNKNOWN',
+      ported: r.PORTED || 'NO',
+      state: r.STATE || 'UNKNOWN',
+      timestamp,
+    }
+    await redis.hset(KEYS.searchbugRaw, { [normalizePhone(r.NUMBER)]: JSON.stringify(entry) })
+  }
+  console.log(`Cached ${results.length} SearchBug results for auditing`)
+}
+
+/**
+ * Get cached SearchBug data for a phone (for auditing)
+ */
+export async function getSearchBugCache(phone: string): Promise<SearchBugCacheEntry | null> {
+  const redis = getRedis()
+  const raw = await redis.hget(KEYS.searchbugRaw, normalizePhone(phone))
+  if (!raw) return null
+  return JSON.parse(raw as string)
+}
+
+/**
+ * Get cached SearchBug data for multiple phones (for auditing)
+ */
+export async function getSearchBugCacheBatch(phones: string[]): Promise<Map<string, SearchBugCacheEntry>> {
+  const redis = getRedis()
+  const results = new Map<string, SearchBugCacheEntry>()
+
+  for (const phone of phones) {
+    const normalized = normalizePhone(phone)
+    const raw = await redis.hget(KEYS.searchbugRaw, normalized)
+    if (raw) {
+      results.set(phone, JSON.parse(raw as string))
+    }
+  }
+
+  return results
 }
 
 /**

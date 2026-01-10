@@ -2,6 +2,8 @@ import { NextResponse } from 'next/server'
 import { parse } from 'csv-parse/sync'
 import { Redis } from '@upstash/redis'
 import { Client } from '@upstash/qstash'
+import { toRedisPhone } from '@/src/lib/phone'
+
 // Note: OpenPhone dedup check removed from here - it's done in prefilter
 // Having it in both places caused inconsistent behavior (phones pass prefilter
 // but get skipped here if the API was flaky during prefilter)
@@ -149,6 +151,39 @@ function personalizeMessage(template: string, contact: NormalizedContact): strin
     .replace(/\{lastName\}/g, contact.lastName || '')
     .replace(/\{city\}/g, contact.city)
     .replace(/\{neighborhood\}/g, contact.subdivision || contact.city)
+}
+
+/**
+ * Deduplicate contacts by phone number
+ * Keeps first occurrence (primary contacts added before secondary in parseCSV)
+ * Returns deduplicated contacts and count of duplicates removed
+ */
+function deduplicateContacts(
+  contacts: NormalizedContact[]
+): { unique: NormalizedContact[]; duplicateCount: number } {
+  const seenPhones = new Set<string>()
+  const unique: NormalizedContact[] = []
+  let duplicateCount = 0
+
+  for (const contact of contacts) {
+    // Normalize to 10-digit for comparison
+    const normalized = toRedisPhone(contact.phone)
+    if (!normalized) {
+      // Keep contacts with unparseable phones (shouldn't happen but be safe)
+      unique.push(contact)
+      continue
+    }
+
+    if (seenPhones.has(normalized)) {
+      duplicateCount++
+      continue
+    }
+
+    seenPhones.add(normalized)
+    unique.push(contact)
+  }
+
+  return { unique, duplicateCount }
 }
 
 function selectVariant(variants: CampaignVariant[]): CampaignVariant {
@@ -398,10 +433,16 @@ export async function POST(request: Request) {
     }
 
     // Parse CSV
-    const { contacts, stats: parseStats } = parseCSV(csvData)
-    console.log(`[CAMPAIGN CREATE v2] Parsed CSV: ${contacts.length} contacts, parseStats:`, JSON.stringify(parseStats))
-    if (contacts.length === 0) {
+    const { contacts: rawContacts, stats: parseStats } = parseCSV(csvData)
+    console.log(`[CAMPAIGN CREATE v2] Parsed CSV: ${rawContacts.length} contacts, parseStats:`, JSON.stringify(parseStats))
+    if (rawContacts.length === 0) {
       return NextResponse.json({ error: 'No valid contacts found in CSV', parseStats }, { status: 400 })
+    }
+
+    // Deduplicate by phone number (keeps first occurrence - primary before secondary)
+    const { unique: contacts, duplicateCount } = deduplicateContacts(rawContacts)
+    if (duplicateCount > 0) {
+      console.log(`[CAMPAIGN CREATE v2] Removed ${duplicateCount} duplicate phone numbers`)
     }
 
     // Build variants
@@ -462,6 +503,7 @@ export async function POST(request: Request) {
       batchSize: batchContacts.length,
       remainingContacts: remainingContacts.length,
       nextBatchAt: nextBatchTime?.toISOString(),
+      duplicatesRemoved: duplicateCount, // Number of duplicate phones removed
     }
 
     let queueIndex = 0

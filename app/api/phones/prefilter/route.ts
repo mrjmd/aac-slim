@@ -63,7 +63,8 @@ export async function POST(request: NextRequest) {
 
         // Track removed phones and verified clean phones
         let afterSuppression: Array<{ id: string; phone: string }> = []
-        let verifiedCleanPhones: Array<{ id: string; phone: string }> = []
+        // Track which phones are verified clean (will skip SearchBug but NOT dedup checks)
+        const verifiedCleanSet = new Set<string>()
 
         // Track DNC-only phones separately (DNC but NOT landline/litigator/optout)
         // These may be included based on includeDnc setting
@@ -98,17 +99,21 @@ export async function POST(request: NextRequest) {
               continue
             }
           } else if (cacheResults.verifiedClean.has(phone.phone)) {
-            // Already verified clean - skip SearchBug but include in final list
-            verifiedCleanPhones.push(phone)
+            // Already verified clean - skip SearchBug but STILL check dedup
+            verifiedCleanSet.add(phone.phone)
+            afterSuppression.push(phone)
           } else {
             afterSuppression.push(phone)
           }
         }
 
-        // If includeDnc is enabled, add DNC-only phones to verified clean list
+        // If includeDnc is enabled, add DNC-only phones to the list
         // (They're ONLY DNC - not landline, not litigator, not optout)
         if (body.includeDnc && cachedDncOnlyPhones.length > 0) {
-          verifiedCleanPhones.push(...cachedDncOnlyPhones)
+          for (const phone of cachedDncOnlyPhones) {
+            verifiedCleanSet.add(phone.phone)
+            afterSuppression.push(phone)
+          }
           // Adjust the removed count since we're including them
           removed.dnc = 0
         }
@@ -118,9 +123,9 @@ export async function POST(request: NextRequest) {
           phase: 1,
           total: 4,
           message: 'Cache check complete',
-          detail: `Removed ${totalSuppressed} suppressed, ${verifiedCleanPhones.length} already verified clean, ${afterSuppression.length} need validation`,
+          detail: `Removed ${totalSuppressed} suppressed, ${verifiedCleanSet.size} verified clean (will skip SearchBug), ${afterSuppression.length} to check`,
           remaining: afterSuppression.length,
-          verifiedClean: verifiedCleanPhones.length,
+          verifiedClean: verifiedCleanSet.size,
         })
 
         // PHASE 2: Ever-messaged check
@@ -237,7 +242,18 @@ export async function POST(request: NextRequest) {
         }
 
         // PHASE 4: Complete
-        // Combine verified clean (from cache) + phones that passed all checks (need SearchBug)
+        // Split results: verified clean (skip SearchBug) vs need SearchBug
+        const verifiedCleanPhones: Array<{ id: string; phone: string }> = []
+        const needSearchBug: Array<{ id: string; phone: string }> = []
+
+        for (const phone of afterOpenPhone) {
+          if (verifiedCleanSet.has(phone.phone)) {
+            verifiedCleanPhones.push(phone)
+          } else {
+            needSearchBug.push(phone)
+          }
+        }
+
         const totalRemoved = Object.values(removed).reduce((a, b) => a + b, 0)
         const preFilterStats = {
           original: validPhones.length,
@@ -254,7 +270,7 @@ export async function POST(request: NextRequest) {
             : 'Pre-filtering complete',
           preFilterStats,
           // Phones that need SearchBug validation
-          preFilteredPhones: afterOpenPhone,
+          preFilteredPhones: needSearchBug,
           // Phones already verified clean (skip SearchBug)
           verifiedCleanPhones: verifiedCleanPhones,
           totalRemoved,

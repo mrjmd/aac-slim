@@ -46,7 +46,7 @@ function personalizeMessage(template: string, contact: NormalizedContact): strin
     .replace(/\{neighborhood\}/g, contact.subdivision || contact.city)
 }
 
-async function createPipedriveContact(contact: NormalizedContact, campaignName: string): Promise<{ id: number; created: boolean }> {
+async function createPipedriveContact(contact: NormalizedContact, _campaignName: string): Promise<{ id: number; created: boolean }> {
   const apiKey = process.env.PIPEDRIVE_API_KEY
   const domain = process.env.PIPEDRIVE_COMPANY_DOMAIN
 

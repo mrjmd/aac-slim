@@ -47,15 +47,25 @@ interface Campaign {
   followUp?: FollowUpConfig
 }
 
+// Normalize to title case: "QUINCY" -> "Quincy", "south boston" -> "South Boston"
+function toTitleCase(str: string): string {
+  if (!str) return ''
+  return str
+    .toLowerCase()
+    .split(' ')
+    .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(' ')
+}
+
 function personalizeMessage(
   template: string,
   recipient: Recipient
 ): string {
   return template
-    .replace(/\{firstName\}/g, recipient.firstName)
-    .replace(/\{lastName\}/g, recipient.lastName || '')
-    .replace(/\{city\}/g, recipient.city)
-    .replace(/\{neighborhood\}/g, recipient.subdivision || recipient.city)
+    .replace(/\{firstName\}/g, toTitleCase(recipient.firstName))
+    .replace(/\{lastName\}/g, toTitleCase(recipient.lastName || ''))
+    .replace(/\{city\}/g, toTitleCase(recipient.city))
+    .replace(/\{neighborhood\}/g, toTitleCase(recipient.subdivision || recipient.city))
 }
 
 // Verify QStash signature for cron security
@@ -127,8 +137,9 @@ export async function POST(request: Request) {
 
         let queueIndex = 0
 
-        for (const [phone, recipientJson] of Object.entries(recipientsData)) {
-          const recipient = JSON.parse(recipientJson) as Recipient
+        for (const [phone, recipientRaw] of Object.entries(recipientsData)) {
+          // Handle both string (manual JSON.stringify) and object (Upstash auto-deserialize)
+          const recipient = (typeof recipientRaw === 'string' ? JSON.parse(recipientRaw) : recipientRaw) as Recipient
 
           // Skip if already responded
           if (recipient.responded) continue

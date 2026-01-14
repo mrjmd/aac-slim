@@ -36,12 +36,22 @@ interface NormalizedContact {
   zip: string | null
 }
 
+// Normalize to title case: "QUINCY" -> "Quincy", "south boston" -> "South Boston"
+function toTitleCase(str: string): string {
+  if (!str) return ''
+  return str
+    .toLowerCase()
+    .split(' ')
+    .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(' ')
+}
+
 function personalizeMessage(template: string, contact: NormalizedContact): string {
   return template
-    .replace(/\{firstName\}/g, contact.firstName)
-    .replace(/\{lastName\}/g, contact.lastName || '')
-    .replace(/\{city\}/g, contact.city)
-    .replace(/\{neighborhood\}/g, contact.subdivision || contact.city)
+    .replace(/\{firstName\}/g, toTitleCase(contact.firstName))
+    .replace(/\{lastName\}/g, toTitleCase(contact.lastName || ''))
+    .replace(/\{city\}/g, toTitleCase(contact.city))
+    .replace(/\{neighborhood\}/g, toTitleCase(contact.subdivision || contact.city))
 }
 
 async function createPipedriveContact(contact: NormalizedContact, _campaignName: string): Promise<{ id: number; created: boolean }> {

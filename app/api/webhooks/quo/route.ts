@@ -234,8 +234,25 @@ export async function POST(request: Request) {
   const signature = request.headers.get('openphone-signature') || undefined
 
   if (!verifySignature(rawBody, signature, env.quo.webhookSecret)) {
-    log.warn('Invalid webhook signature')
-    return NextResponse.json({ error: 'Invalid signature' }, { status: 401 })
+    // Fallback: try re-serialized body in case edge middleware consumed/re-encoded the raw body
+    let fallbackPassed = false
+    try {
+      const reserialized = JSON.stringify(JSON.parse(rawBody))
+      if (reserialized !== rawBody) {
+        fallbackPassed = verifySignature(reserialized, signature, env.quo.webhookSecret)
+      }
+    } catch {
+      // rawBody wasn't valid JSON, fallback not applicable
+    }
+
+    if (!fallbackPassed) {
+      log.warn('Invalid webhook signature', {
+        bodyLength: rawBody.length,
+        hasSignature: !!signature,
+        signaturePrefix: signature?.substring(0, 30),
+      })
+      return NextResponse.json({ error: 'Invalid signature' }, { status: 401 })
+    }
   }
 
   let payload: QuoWebhookPayload

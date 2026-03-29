@@ -15,7 +15,19 @@
     "typecheck": "tsc --noEmit",
     "campaign:start": "npx tsx scripts/run-campaign.ts",
     "campaign:stats": "npx tsx -e \"const { getCampaign } = require('./src/lib/redis.js'); getCampaign(process.argv[2]).then(c => console.log(JSON.stringify(c, null, 2)))\"",
-    "prepare": "husky"
+    "prepare": "husky",
+    "doctor": "python3 harness/doctor.py",
+    "doctor:diagnose": "python3 harness/doctor.py diagnose",
+    "doctor:stabilize": "python3 harness/doctor.py stabilize",
+    "doctor:baseline": "python3 harness/doctor.py baseline",
+    "doctor:fixtures": "python3 harness/doctor.py fixtures",
+    "doctor:qa": "python3 harness/doctor.py qa",
+    "doctor:solidify": "python3 harness/doctor.py solidify",
+    "spec": "python3 harness/architect.py",
+    "spec:new": "python3 harness/architect.py new",
+    "spec:resume": "python3 harness/architect.py resume",
+    "spec:audit": "python3 harness/architect.py audit",
+    "agent:loop": "python3 harness/coding/loop.py"
   },
   "dependencies": {
     "@upstash/qstash": "^2.8.4",

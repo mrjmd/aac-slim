@@ -26,6 +26,17 @@ interface QuoContact {
   updatedAt: string;
 }
 
+interface QuoCustomFieldValue {
+  key: string;
+  value: string | number | boolean | string[] | null;
+}
+
+interface QuoCustomFieldDefinition {
+  name: string;
+  key: string;
+  type: 'address' | 'boolean' | 'date' | 'multi-select' | 'number' | 'string' | 'url';
+}
+
 interface QuoContactCreate {
   defaultFields: {
     firstName?: string;
@@ -35,6 +46,7 @@ interface QuoContactCreate {
     emails?: Array<{ value: string; name: string }>;
     phoneNumbers: Array<{ value: string; name: string }>;
   };
+  customFields?: QuoCustomFieldValue[];
 }
 
 interface QuoPhoneNumber {
@@ -105,19 +117,36 @@ async function quoRequest<T>(
  */
 export async function searchContactByPhone(phone: string): Promise<QuoContact | null> {
   try {
-    // OpenPhone returns all contacts, we need to filter client-side
-    const result = await quoRequest<{ data: QuoContact[] }>('/contacts');
+    // OpenPhone requires client-side filtering and paginates at max 50
+    let pageToken: string | undefined;
 
-    // Find contact with matching phone number
-    const match = result.data?.find((contact) => {
-      const phones = contact.defaultFields?.phoneNumbers || [];
-      return phones.some((p) => p.value === phone);
-    });
+    do {
+      const params = new URLSearchParams({ maxResults: '50' });
+      if (pageToken) params.set('pageToken', pageToken);
 
-    if (match) {
-      log.debug('Found contact by phone', { phone, contactId: match.id });
-      return match;
-    }
+      let result: { data: QuoContact[]; nextPageToken?: string };
+      try {
+        result = await quoRequest<{ data: QuoContact[]; nextPageToken?: string }>(
+          `/contacts?${params.toString()}`
+        );
+      } catch (pageError) {
+        // OpenPhone can 500 on pages with corrupt contact data — skip and continue
+        log.warn('Contacts page failed, skipping', { pageToken, error: (pageError as Error).message });
+        break;
+      }
+
+      const match = result.data?.find((contact) => {
+        const phones = contact.defaultFields?.phoneNumbers || [];
+        return phones.some((p) => p.value === phone);
+      });
+
+      if (match) {
+        log.debug('Found contact by phone', { phone, contactId: match.id });
+        return match;
+      }
+
+      pageToken = result.nextPageToken;
+    } while (pageToken);
 
     log.debug('No contact found for phone', { phone });
     return null;
@@ -162,16 +191,71 @@ export async function createContact(contact: QuoContactCreate): Promise<QuoConta
 
 /**
  * Update an existing contact
+ *
+ * IMPORTANT: The Quo/OpenPhone PATCH API replaces the entire contact state,
+ * not just the fields you send. We must read-merge-write to avoid data loss.
  */
 export async function updateContact(
   id: string,
-  updates: { defaultFields: Partial<QuoContactCreate['defaultFields']> }
+  updates: { defaultFields?: Partial<QuoContactCreate['defaultFields']>; customFields?: QuoCustomFieldValue[] }
 ): Promise<QuoContact> {
-  log.info('Updating contact', { contactId: id, updates });
+  log.info('Updating contact', { contactId: id });
+
+  // Read current state to merge (API replaces, doesn't merge)
+  // Native contacts (created in OpenPhone UI) may not be fetchable via API
+  const current = await getContact(id);
+
+  let body: Record<string, unknown>;
+
+  if (current) {
+    // Merge defaultFields: keep existing values, overlay updates
+    const currentDefaults = current.defaultFields || {};
+    const mergedDefaults: Record<string, unknown> = {
+      firstName: currentDefaults.firstName,
+      lastName: currentDefaults.lastName,
+      company: currentDefaults.company,
+      role: currentDefaults.role,
+      phoneNumbers: currentDefaults.phoneNumbers || [],
+      emails: currentDefaults.emails || [],
+    };
+
+    if (updates.defaultFields) {
+      for (const [key, value] of Object.entries(updates.defaultFields)) {
+        if (value !== undefined) {
+          mergedDefaults[key] = value;
+        }
+      }
+    }
+
+    // Merge customFields: overlay by key, keep existing fields not in updates
+    const existingCustom = (current as unknown as { customFields?: QuoCustomFieldValue[] }).customFields || [];
+    const mergedCustom = [...existingCustom];
+    if (updates.customFields) {
+      for (const update of updates.customFields) {
+        const idx = mergedCustom.findIndex(f => f.key === update.key);
+        if (idx >= 0) {
+          mergedCustom[idx] = update;
+        } else {
+          mergedCustom.push(update);
+        }
+      }
+    }
+
+    body = { defaultFields: mergedDefaults };
+    if (mergedCustom.length > 0) {
+      body.customFields = mergedCustom;
+    }
+  } else {
+    // Can't read current state (native contact) — send updates as-is
+    log.warn('Cannot read contact for merge, sending partial update', { contactId: id });
+    body = {};
+    if (updates.defaultFields) body.defaultFields = updates.defaultFields;
+    if (updates.customFields) body.customFields = updates.customFields;
+  }
 
   const result = await quoRequest<{ data: QuoContact }>(`/contacts/${id}`, {
     method: 'PATCH',
-    body: JSON.stringify(updates),
+    body: JSON.stringify(body),
   });
 
   log.info('Updated contact', { contactId: result.data.id });
@@ -185,6 +269,33 @@ export async function deleteContact(id: string): Promise<void> {
   log.info('Deleting contact', { contactId: id });
   await quoRequest(`/contacts/${id}`, { method: 'DELETE' });
   log.info('Deleted contact', { contactId: id });
+}
+
+// Cache for custom field definitions
+let cachedCustomFields: QuoCustomFieldDefinition[] | null = null;
+
+/**
+ * Get all custom field definitions from Quo
+ * Results are cached after first call
+ */
+export async function getCustomFields(): Promise<QuoCustomFieldDefinition[]> {
+  if (cachedCustomFields) {
+    return cachedCustomFields;
+  }
+
+  const result = await quoRequest<{ data: QuoCustomFieldDefinition[] }>('/contact-custom-fields');
+  cachedCustomFields = result.data || [];
+  log.debug('Fetched custom field definitions', { count: cachedCustomFields.length });
+  return cachedCustomFields;
+}
+
+/**
+ * Look up a custom field key by name (case-insensitive)
+ */
+export async function getCustomFieldKey(fieldName: string): Promise<string | null> {
+  const fields = await getCustomFields();
+  const match = fields.find(f => f.name.toLowerCase() === fieldName.toLowerCase());
+  return match?.key || null;
 }
 
 /**

@@ -40,3 +40,10 @@ coverage/
 /playwright/.auth/
 /tests/.auth/
 .env.vercel
+playwright-report/
+test-results/
+.playwright/
+__pycache__/
+*.pyc
+.venv/
+venv/

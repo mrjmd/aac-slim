@@ -427,6 +427,36 @@ export function getPrimaryEmail(person: PipedrivePerson): string | null {
 }
 
 // ============================================
+// CROSS-SYSTEM ID FIELDS
+// ============================================
+
+// Custom field keys for storing external system IDs on Pipedrive persons
+export const PIPEDRIVE_CROSS_SYSTEM_FIELDS = {
+  QUO_CONTACT_ID: '66f248c11ab22515e0dcd93f0bd9671ba6970fd4',
+  QB_CUSTOMER_ID: 'a02e76a3d2d7e38cacd476aaea1c2a8809264025',
+} as const;
+
+/**
+ * Read a custom field value from a Pipedrive person
+ */
+export async function getPersonCustomField(personId: number, fieldKey: string): Promise<string | null> {
+  const person = await getPerson(personId) as unknown as Record<string, unknown> | null;
+  if (!person) return null;
+  const value = person[fieldKey];
+  return typeof value === 'string' && value ? value : null;
+}
+
+/**
+ * Write a custom field value to a Pipedrive person
+ */
+export async function setPersonCustomField(personId: number, fieldKey: string, value: string): Promise<void> {
+  await pipedriveRequest(`/persons/${personId}`, {
+    method: 'PUT',
+    body: JSON.stringify({ [fieldKey]: value }),
+  });
+}
+
+// ============================================
 // ATTRIBUTION ENGINE FUNCTIONS
 // ============================================
 
